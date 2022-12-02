@@ -1,7 +1,6 @@
 import requests
 from bs4 import BeautifulSoup as BS
 import telebot
-from telebot import apihelper
 
 
 # Коннектимся, парсим и получаем итоговые значения.
@@ -44,28 +43,43 @@ class Values:
         else:
             print("Ошибка в количестве значений баланса!")
 
-
         traffic_data = html.select(".lkInfoTable:nth-child(3) > tr:nth-child(2) > td:nth-child(2)")
         if len(traffic_data) > 0:
             traffic = traffic_data[0].text
             traffic = ''.join(i for i in traffic if not i.isalpha())
-            traffic = traffic.replace(" ","")
+            traffic = traffic.replace(" ", "")
             traffic = int(traffic)
-            traffic = round(traffic/(1024**3),2)
-            self.traffic = str(traffic)+" Гб"
+            traffic = round(traffic / (1024 ** 3), 2)
+            self.traffic = str(traffic) + " Гб"
         else:
             print("Ошибка в количестве значений баланса!")
+
 
 def values_to_messaging():
     return Values()
 
-def printer():
- x=values_to_messaging()
- print(x.traffic,x.money,x.speed)
+
+def tlgbot():
+    bot = telebot.TeleBot("5660544168:AAEm0W-cbpR3L_8MKUINp7mzgG1d2mb7pT8", parse_mode=None)
+
+    @bot.message_handler(commands=['start'])
+    def start_msg(message):
+        if message.chat.id == 425457895:
+            bot.send_message(message.chat.id, "Привет!")
+        else:
+            bot.send_message(message.chat.id, 'Функционал бота не для ваc!')
+
+    @bot.message_handler(commands=['getstate'])
+    def start_msg(message):
+        if message.chat.id == 425457895:
+            x = values_to_messaging()
+            bot.send_message(message.chat.id,
+                             "Баланс: " + "*"+x.money+"*" + "\r\n" + "Остаток трафика: " +"*"+ x.traffic +"*"+ "\r\n" + "Скорость: " +"*"+ x.speed+"*",
+                             parse_mode='Markdown')
+        else:
+            bot.send_message(message.chat.id, 'Функционал бота не для ваc!')
+    bot.infinity_polling()
 
 
-# Press the green button in the gutter to run the script.
 if __name__ == '__main__':
-    printer()
-
-# See PyCharm help at https://www.jetbrains.com/help/pycharm/
+    tlgbot()
