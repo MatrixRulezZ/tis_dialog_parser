@@ -15,9 +15,5 @@ ENV PATH=/root/.local:$PATH
 
 ENV LD_LIBRARY_PATH=/lib64:$LD_LIBRARY_PATH
 
-RUN apt-get update && apt-get install -y  \
-  libaio1 \
-    build-essential \
-  && rm -rf /var/lib/apt/lists/*
 
-CMD ["python", "-u", "./main.py"]
+CMD ["python", "-u", "./main.py"]r
