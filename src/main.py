@@ -6,6 +6,7 @@ from telebot import types
 import re
 import logging
 import time
+import os
 from collections import OrderedDict
 
 # Настройка логирования
@@ -15,9 +16,24 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Глобальное хранилище для уведомлений (сохраняет порядок добавления)
+# Получаем конфигурацию из переменных окружения
+BOT_TOKEN = os.getenv('BOT_TOKEN', '')
+CHAT_ID = int(os.getenv('CHAT_ID', '0'))
+TIS_LOGIN = os.getenv('TIS_LOGIN', '')
+TIS_PASSWORD = os.getenv('TIS_PASSWORD', '')
+
+# Проверка обязательных переменных
+if not BOT_TOKEN or not CHAT_ID or not TIS_LOGIN or not TIS_PASSWORD:
+    logger.error("Необходимые переменные окружения не установлены!")
+    logger.error(f"BOT_TOKEN: {'установлен' if BOT_TOKEN else 'отсутствует'}")
+    logger.error(f"CHAT_ID: {'установлен' if CHAT_ID else 'отсутствует'}")
+    logger.error(f"TIS_LOGIN: {'установлен' if TIS_LOGIN else 'отсутствует'}")
+    logger.error(f"TIS_PASSWORD: {'установлен' if TIS_PASSWORD else 'отсутствует'}")
+    exit(1)
+
+# Глобальное хранилище для уведомлений
 notifications_store = OrderedDict()
-MAX_NOTIFICATIONS = 50  # Максимальное количество хранимых уведомлений
+MAX_NOTIFICATIONS = 50
 
 
 async def login(session):
@@ -28,8 +44,8 @@ async def login(session):
 
     data = {
         'backUrl': login_url,
-        'login': '2638920',
-        'passv': '39361951',
+        'login': TIS_LOGIN,
+        'passv': TIS_PASSWORD,
         'remember': 'yes',
     }
 
@@ -63,7 +79,7 @@ async def login(session):
 
 async def fetch_notifications(session):
     """Функция для получения и парсинга уведомлений"""
-    notifications_url = "https://stats.tis-dialog.ru/index.php?mod=msg&phnumber=2638920"
+    notifications_url = f"https://stats.tis-dialog.ru/index.php?mod=msg&phnumber={TIS_LOGIN}"
     try:
         async with session.get(notifications_url) as response:
             if response.status != 200:
@@ -319,8 +335,8 @@ async def check_notifications(bot, chat_id):
 
 class TisDialogBot:
     def __init__(self):
-        self.bot = AsyncTeleBot("5660544168:AAEm0W-cbpR3L_8MKUINp7mzgG1d2mb7pT8", parse_mode='Markdown')
-        self.chat_id = 425457895
+        self.bot = AsyncTeleBot(BOT_TOKEN, parse_mode='Markdown')
+        self.chat_id = CHAT_ID
         self.values = AsyncValues()
         self.setup_handlers()
 
