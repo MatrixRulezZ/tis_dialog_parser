@@ -1,6 +1,6 @@
 FROM python:3.11-slim
 
-# Установка системных зависимостей
+# Установка системных зависимостей #
 RUN apt-get update && apt-get install -y \
     gcc \
     && rm -rf /var/lib/apt/lists/*
@@ -22,3 +22,4 @@ CMD ["python", "-u", "main.py"]
 
 HEALTHCHECK --interval=5m --timeout=30s \
   CMD curl -f http://localhost:8080/health || exit 1
+
