@@ -19,3 +19,6 @@ COPY src/ .
 
 # Запускаем бота
 CMD ["python", "-u", "main.py"]
+
+HEALTHCHECK --interval=5m --timeout=30s \
+  CMD curl -f http://localhost:8080/health || exit 1

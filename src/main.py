@@ -7,7 +7,9 @@ import re
 import logging
 import time
 import os
+import json
 from collections import OrderedDict
+from datetime import datetime
 
 # Настройка логирования
 logging.basicConfig(
@@ -25,15 +27,43 @@ TIS_PASSWORD = os.getenv('TIS_PASSWORD', '')
 # Проверка обязательных переменных
 if not BOT_TOKEN or not CHAT_ID or not TIS_LOGIN or not TIS_PASSWORD:
     logger.error("Необходимые переменные окружения не установлены!")
-    logger.error(f"BOT_TOKEN: {'установлен' if BOT_TOKEN else 'отсутствует'}")
-    logger.error(f"CHAT_ID: {'установлен' if CHAT_ID else 'отсутствует'}")
-    logger.error(f"TIS_LOGIN: {'установлен' if TIS_LOGIN else 'отсутствует'}")
-    logger.error(f"TIS_PASSWORD: {'установлен' if TIS_PASSWORD else 'отсутствует'}")
     exit(1)
 
 # Глобальное хранилище для уведомлений
 notifications_store = OrderedDict()
 MAX_NOTIFICATIONS = 50
+BACKUP_FILE = "notifications_backup.json"
+
+
+# Функции для работы с резервными копиями
+def load_notifications():
+    """Загружаем уведомления из резервной копии"""
+    global notifications_store
+    try:
+        if os.path.exists(BACKUP_FILE):
+            with open(BACKUP_FILE, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                # Восстанавливаем порядок уведомлений
+                for item in data:
+                    notifications_store[item['id']] = item
+                logger.info(f"Загружено {len(notifications_store)} уведомлений из резервной копии")
+    except Exception as e:
+        logger.error(f"Ошибка при загрузке резервной копии: {e}")
+
+
+def save_notifications():
+    """Сохраняем уведомления в резервную копию"""
+    try:
+        with open(BACKUP_FILE, 'w', encoding='utf-8') as f:
+            # Преобразуем OrderedDict в список для сохранения
+            json.dump(list(notifications_store.values()), f, ensure_ascii=False, indent=2)
+        logger.info(f"Резервная копия уведомлений сохранена ({len(notifications_store)} записей)")
+    except Exception as e:
+        logger.error(f"Ошибка при сохранении резервной копии: {e}")
+
+
+# Загружаем существующие уведомления при запуске
+load_notifications()
 
 
 async def login(session):
@@ -145,16 +175,22 @@ async def fetch_notifications(session):
                         'date': date_text,
                         'subject': link.text.strip(),
                         'text': message_text,
-                        'full_url': full_url
+                        'full_url': full_url,
+                        'added_at': datetime.now().isoformat()  # Время добавления в бот
                     }
 
                     # Сохраняем в хранилище
                     notifications_store[notif_id] = notification_data
                     # Удаляем старые уведомления, если превышен лимит
                     if len(notifications_store) > MAX_NOTIFICATIONS:
-                        notifications_store.popitem(last=False)
+                        oldest_id = next(iter(notifications_store))
+                        del notifications_store[oldest_id]
 
                     new_notifications.append(notification_data)
+
+            # Сохраняем новые уведомления в резервную копию
+            if new_notifications:
+                save_notifications()
 
             return new_notifications
     except Exception as e:
@@ -579,7 +615,8 @@ class TisDialogBot:
                     "• 🔔 *Уведомления при:*\n"
                     "  - Остатке трафика < 100 Гб\n"
                     "  - Отрицательном балансе\n"
-                    "  - Новых сообщениях в ЛК (проверка раз в 6 часов)\n\n"
+                    "  - Новых сообщениях в ЛК (проверка раз в 6 часов)\n"
+                    f"• 💾 *Резервное копирование:* {len(notifications_store)} уведомлений сохранено\n\n"
                     "Для изменения параметров обратитесь к администратору.",
                     parse_mode='Markdown',
                     reply_markup=self.create_keyboard()

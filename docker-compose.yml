@@ -2,10 +2,12 @@ version: '3.8'
 services:
   tis-bot:
     image: tis-dialog-bot
-    build: .   # Собирать образ из текущей директории
+    build: .
     environment:
       - BOT_TOKEN=${BOT_TOKEN}
       - CHAT_ID=${CHAT_ID}
       - TIS_LOGIN=${TIS_LOGIN}
       - TIS_PASSWORD=${TIS_PASSWORD}
-    restart: unless-stopped  # Автоматически перезапускать при сбоях
+    volumes:
+      - ./data:/app  # Монтируем папку для сохранения резервных копий
+    restart: unless-stopped
