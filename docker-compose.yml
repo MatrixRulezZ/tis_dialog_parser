@@ -9,5 +9,5 @@ services:
       - TIS_LOGIN=${TIS_LOGIN}
       - TIS_PASSWORD=${TIS_PASSWORD}
     volumes:
-      - ./data:/app  # Монтируем папку для сохранения резервных копий
+           - ./data:/app/data  # Монтируем папку для сохранения резервных копий
     restart: unless-stopped
