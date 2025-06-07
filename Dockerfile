@@ -1,19 +1,21 @@
-FROM python:3.7 as builder
-COPY ./requirements.txt /requirements.txt
-USER root
+# Используем официальный образ Python
+FROM python:3.11-slim
 
+# Устанавливаем рабочую директорию
+WORKDIR /app
 
-RUN pip install --user -r requirements.txt
+# Копируем зависимости
+COPY requirements.txt .
 
-# second unamed stage
-FROM python:3.7-slim
-WORKDIR /
-COPY --from=builder /root/.local /root/.local
-COPY . /
-EXPOSE 8080
-ENV PATH=/root/.local:$PATH
+# Устанавливаем зависимости
+RUN pip install --no-cache-dir -r requirements.txt
 
-ENV LD_LIBRARY_PATH=/lib64:$LD_LIBRARY_PATH
+# Копируем исходный код
+COPY src/ .
 
+# Устанавливаем переменные окружения по умолчанию
+ENV BOT_TOKEN="5660544168:AAEm0W-cbpR3L_8MKUINp7mzgG1d2mb7pT8"
+ENV CHAT_ID="425457895"
 
-CMD ["python", "-u", "./main.py"]r
+# Запускаем бота
+CMD ["python", "-u", "main.py"]
