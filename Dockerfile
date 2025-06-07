@@ -20,6 +20,9 @@ COPY src/ .
 # Запускаем бота
 CMD ["python", "-u", "main.py"]
 
+# Создаем директорию для данных
+RUN mkdir -p /app/data
+
 HEALTHCHECK --interval=5m --timeout=30s \
   CMD curl -f http://localhost:8080/health || exit 1
 
