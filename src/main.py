@@ -11,8 +11,6 @@ import json
 from collections import OrderedDict
 from datetime import datetime
 import hashlib
-import qrcode
-from io import BytesIO
 
 # Настройка логирования
 logging.basicConfig(
@@ -26,7 +24,6 @@ BOT_TOKEN = os.getenv('BOT_TOKEN', '')
 CHAT_ID = int(os.getenv('CHAT_ID', '0'))
 TIS_LOGIN = os.getenv('TIS_LOGIN', '')
 TIS_PASSWORD = os.getenv('TIS_PASSWORD', '')
-COMPANY_NAME = "Тис-Диалог"  # Название компании для платежей
 
 # Проверка обязательных переменных
 if not BOT_TOKEN or not CHAT_ID or not TIS_LOGIN or not TIS_PASSWORD:
@@ -471,7 +468,6 @@ class TisDialogBot:
         self.bot = AsyncTeleBot(BOT_TOKEN, parse_mode='Markdown')
         self.chat_id = CHAT_ID
         self.values = AsyncValues()
-        self.pending_payments = {}  # Для хранения состояния оплаты
         self.setup_handlers()
 
     def create_keyboard(self):
@@ -481,28 +477,8 @@ class TisDialogBot:
         btn_settings = types.KeyboardButton('⚙️ Настройки')
         btn_refresh = types.KeyboardButton('🔄 Обновить данные')
         btn_notifications = types.KeyboardButton('🔔 Уведомления')
-        btn_pay = types.KeyboardButton('💳 Оплатить')
-        markup.add(btn_status, btn_traffic, btn_notifications, btn_settings, btn_refresh, btn_pay)
+        markup.add(btn_status, btn_traffic, btn_notifications, btn_settings, btn_refresh)
         return markup
-
-    def generate_qr_code(self, text):
-        """Генерация QR-кода для оплаты"""
-        qr = qrcode.QRCode(
-            version=1,
-            error_correction=qrcode.constants.ERROR_CORRECT_L,
-            box_size=10,
-            border=4,
-        )
-        qr.add_data(text)
-        qr.make(fit=True)
-
-        img = qr.make_image(fill_color="black", back_color="white")
-        bio = BytesIO()
-        bio.name = 'qr.png'
-        img.save(bio, 'PNG')
-        bio.seek(0)
-
-        return bio
 
     def setup_handlers(self):
         @self.bot.message_handler(commands=['start', 'help'])
@@ -516,8 +492,7 @@ class TisDialogBot:
                     "🌐 Остаток трафика - данные о трафике\n"
                     "🔔 Уведомления - просмотр системных сообщений\n"
                     "⚙️ Настройки - информация о мониторинге\n"
-                    "🔄 Обновить данные - принудительное обновление\n"
-                    "💳 Оплатить - пополнить баланс",
+                    "🔄 Обновить данные - принудительное обновление",
                     parse_mode='Markdown',
                     reply_markup=self.create_keyboard()
                 )
@@ -757,148 +732,6 @@ class TisDialogBot:
                     message.chat.id,
                     '🚫 Доступ запрещен!'
                 )
-
-        # ============== ОПЛАТА ==============
-        @self.bot.message_handler(func=lambda msg: msg.text == '💳 Оплатить')
-        async def initiate_payment(message):
-            if message.chat.id != self.chat_id:
-                return
-
-            # Запрашиваем сумму оплаты
-            await self.bot.send_message(
-                message.chat.id,
-                "💸 *Введите сумму для оплаты (рубли):*",
-                parse_mode='Markdown',
-                reply_markup=types.ForceReply(selective=True)
-            )
-            self.pending_payments[message.chat.id] = {"step": "amount"}
-
-        @self.bot.message_handler(func=lambda msg: msg.chat.id in self.pending_payments and
-                                                   self.pending_payments[msg.chat.id]["step"] == "amount")
-        async def process_amount(message):
-            try:
-                amount = float(message.text)
-                if amount <= 0:
-                    raise ValueError
-
-                # Сохраняем сумму и переходим к выбору банка
-                self.pending_payments[message.chat.id] = {
-                    "step": "bank",
-                    "amount": amount
-                }
-
-                # Предлагаем выбрать банк
-                markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
-                markup.add(types.KeyboardButton('Сбербанк'))
-                markup.add(types.KeyboardButton('ВТБ'))
-                markup.add(types.KeyboardButton('Тинькофф'))
-                markup.add(types.KeyboardButton('Другой банк'))
-
-                await self.bot.send_message(
-                    message.chat.id,
-                    "🏦 *Выберите банк для оплаты:*",
-                    parse_mode='Markdown',
-                    reply_markup=markup
-                )
-
-            except ValueError:
-                await self.bot.send_message(
-                    message.chat.id,
-                    "❌ Неверный формат суммы. Введите число, например: 500"
-                )
-
-        @self.bot.message_handler(func=lambda msg: msg.chat.id in self.pending_payments and
-                                                   self.pending_payments[msg.chat.id]["step"] == "bank")
-        async def process_bank(message):
-            bank = message.text
-            amount = self.pending_payments[message.chat.id]["amount"]
-            del self.pending_payments[message.chat.id]  # Очищаем состояние
-
-            if bank == 'Сбербанк':
-                # Формируем ссылку для Сбербанка
-                sber_url = (
-                    f"https://online.sberbank.ru/CSAFront/index.do?"
-                    f"accountNumber={TIS_LOGIN}&"
-                    f"amount={amount}&"
-                    f"comment={COMPANY_NAME}"
-                )
-                btn_text = "📱 Открыть в Сбербанк Онлайн"
-                bank_name = "Сбербанк"
-
-            elif bank == 'ВТБ':
-                # Формируем ссылку для ВТБ
-                vtb_url = (
-                    f"https://online.vtb.ru/login?"
-                    f"state=payment&"
-                    f"accountNumber={TIS_LOGIN}&"
-                    f"amount={amount}&"
-                    f"comment={COMPANY_NAME}"
-                )
-                btn_text = "📱 Открыть в ВТБ Онлайн"
-                bank_name = "ВТБ"
-
-            elif bank == 'Тинькофф':
-                # Формируем ссылку для Тинькофф
-                tinkoff_url = (
-                    f"https://www.tinkoff.ru/payments/form/?"
-                    f"accountNumber={TIS_LOGIN}&"
-                    f"amount={amount}&"
-                    f"comment={COMPANY_NAME}"
-                )
-                btn_text = "📱 Открыть в Тинькофф"
-                bank_name = "Тинькофф"
-
-            else:
-                # Генерация QR-кода для других банков
-                qr_text = (
-                    f"Счёт: {TIS_LOGIN}\n"
-                    f"Сумма: {amount} руб.\n"
-                    f"Назначение: Оплата услуг {COMPANY_NAME}\n"
-                    f"Получатель: {COMPANY_NAME}"
-                )
-
-                await self.bot.send_message(
-                    message.chat.id,
-                    f"ℹ️ *Для оплаты через другой банк:*\n\n"
-                    f"1. Откройте приложение вашего банка\n"
-                    f"2. Выберите оплату по QR-коду\n"
-                    f"3. Отсканируйте код ниже\n\n"
-                    f"*Реквизиты для оплаты:*\n"
-                    f"▫️ Счёт: `{TIS_LOGIN}`\n"
-                    f"▫️ Сумма: *{amount} руб.*\n"
-                    f"▫️ Получатель: {COMPANY_NAME}\n"
-                    f"▫️ Назначение: Оплата услуг интернета",
-                    parse_mode='Markdown',
-                    reply_markup=self.create_keyboard()
-                )
-
-                # Отправляем QR-код
-                qr_photo = self.generate_qr_code(qr_text)
-                await self.bot.send_photo(
-                    message.chat.id,
-                    qr_photo,
-                    caption="Отсканируйте QR-код для оплаты"
-                )
-                return
-
-            # Отправляем кнопку для оплаты
-            markup = types.InlineKeyboardMarkup()
-            markup.add(types.InlineKeyboardButton(
-                text=btn_text,
-                url=sber_url if bank == 'Сбербанк' else vtb_url if bank == 'ВТБ' else tinkoff_url
-            ))
-
-            await self.bot.send_message(
-                message.chat.id,
-                f"✅ *Платежная форма готова!*\n\n"
-                f"▫️ Сумма: *{amount:.2f} руб.*\n"
-                f"▫️ Банк: *{bank_name}*\n"
-                f"▫️ Лицевой счет: `{TIS_LOGIN}`\n"
-                f"▫️ Получатель: {COMPANY_NAME}\n\n"
-                "Нажмите кнопку ниже для оплаты:",
-                parse_mode='Markdown',
-                reply_markup=markup
-            )
 
     async def run(self):
         # Запускаем фоновую задачу для уведомлений
