@@ -11,6 +11,8 @@ import json
 from collections import OrderedDict
 from datetime import datetime
 import hashlib
+import qrcode
+from io import BytesIO
 
 # Настройка логирования
 logging.basicConfig(
@@ -24,6 +26,12 @@ BOT_TOKEN = os.getenv('BOT_TOKEN', '')
 CHAT_ID = int(os.getenv('CHAT_ID', '0'))
 TIS_LOGIN = os.getenv('TIS_LOGIN', '')
 TIS_PASSWORD = os.getenv('TIS_PASSWORD', '')
+TIS_PAYEE_NAME = os.getenv('TIS_PAYEE_NAME', '')
+TIS_INN = os.getenv('TIS_INN', '')
+TIS_ACCOUNT = os.getenv('TIS_ACCOUNT', '')
+TIS_BANK_BIC = os.getenv('TIS_BANK_BIC', '')
+TIS_BANK_NAME = os.getenv('TIS_BANK_NAME', '')
+TIS_COR_ACCOUNT = os.getenv('TIS_COR_ACCOUNT', '')
 
 # Проверка обязательных переменных
 if not BOT_TOKEN or not CHAT_ID or not TIS_LOGIN or not TIS_PASSWORD:
@@ -474,11 +482,47 @@ class TisDialogBot:
         markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
         btn_status = types.KeyboardButton('📊 Статус подключения')
         btn_traffic = types.KeyboardButton('🌐 Остаток трафика')
+        btn_payment = types.KeyboardButton('💳 Оплатить')  # Новая кнопка
         btn_settings = types.KeyboardButton('⚙️ Настройки')
         btn_refresh = types.KeyboardButton('🔄 Обновить данные')
         btn_notifications = types.KeyboardButton('🔔 Уведомления')
-        markup.add(btn_status, btn_traffic, btn_notifications, btn_settings, btn_refresh)
+        markup.add(btn_status, btn_traffic, btn_payment, btn_notifications, btn_settings, btn_refresh)
         return markup
+
+    def generate_payment_qr(self, amount, personal_account):
+        """Генерация QR-кода для оплаты по СБП"""
+        # Форматируем данные для СБП QR
+        sbp_data = f"""
+        ST00012
+        Name={TIS_PAYEE_NAME}
+        PersonalAcc={TIS_ACCOUNT}
+        BankName={TIS_BANK_NAME}
+        BIC={TIS_BANK_BIC}
+        CorrespAcc={TIS_COR_ACCOUNT}
+        INN={TIS_INN}
+        KPP=0
+        PayeeINN={TIS_INN}
+        Purpose=Оплата интернет-услуг, л/с {personal_account}
+        Sum={amount * 100:.0f}
+        PersAcc={personal_account}
+        """.strip().replace('\n', '|')
+
+        # Создаем QR-код
+        qr = qrcode.QRCode(
+            version=1,
+            error_correction=qrcode.constants.ERROR_CORRECT_L,
+            box_size=10,
+            border=4,
+        )
+        qr.add_data(sbp_data)
+        qr.make(fit=True)
+
+        img = qr.make_image(fill_color="black", back_color="white")
+        img_byte_arr = BytesIO()
+        img.save(img_byte_arr, format='PNG')
+        img_byte_arr.seek(0)
+
+        return img_byte_arr
 
     def setup_handlers(self):
         @self.bot.message_handler(commands=['start', 'help'])
@@ -490,6 +534,7 @@ class TisDialogBot:
                     "Используйте кнопки меню для управления:\n\n"
                     "📊 Статус подключения - полная информация\n"
                     "🌐 Остаток трафика - данные о трафике\n"
+                    "💳 Оплатить - оплатить услуги интернета\n"
                     "🔔 Уведомления - просмотр системных сообщений\n"
                     "⚙️ Настройки - информация о мониторинге\n"
                     "🔄 Обновить данные - принудительное обновление",
@@ -567,6 +612,128 @@ class TisDialogBot:
                 await self.bot.send_message(
                     message.chat.id,
                     '🚫 Доступ запрещен!'
+                )
+
+        @self.bot.message_handler(func=lambda msg: msg.text == '💳 Оплатить')
+        async def start_payment(message):
+            if message.chat.id != self.chat_id:
+                await self.bot.send_message(message.chat.id, '🚫 Доступ запрещен!')
+                return
+
+            await self.values.fetch()
+            balance = self.values.balance
+
+            # Формируем сообщение с вариантами оплаты
+            msg_text = "💳 *Оплата услуг*\n\n"
+
+            if balance < 0:
+                debt = abs(balance)
+                msg_text += f"📉 У вас задолженность: *{debt:.2f} руб.*\n"
+                msg_text += "Вы можете оплатить:\n"
+                msg_text += f"1. Точную сумму долга ({debt:.2f} руб.)\n"
+                msg_text += "2. Произвольную сумму\n\n"
+                msg_text += "Введите сумму или выберите действие:"
+
+                markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
+                markup.add(types.KeyboardButton(f"Оплатить {debt:.2f} руб."))
+                markup.add(types.KeyboardButton("Другая сумма"))
+                markup.add(types.KeyboardButton("Отмена"))
+            else:
+                msg_text += "💰 Баланс положительный. Вы можете внести предоплату.\n"
+                msg_text += "Введите сумму для оплаты:"
+
+                markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
+                markup.add(types.KeyboardButton("100 руб."))
+                markup.add(types.KeyboardButton("500 руб."))
+                markup.add(types.KeyboardButton("1000 руб."))
+                markup.add(types.KeyboardButton("Другая сумма"))
+                markup.add(types.KeyboardButton("Отмена"))
+
+            await self.bot.send_message(
+                message.chat.id,
+                msg_text,
+                parse_mode='Markdown',
+                reply_markup=markup
+            )
+
+        @self.bot.message_handler(func=lambda msg: msg.text in ["Отмена", "Назад"])
+        async def cancel_payment(message):
+            if message.chat.id == self.chat_id:
+                await self.bot.send_message(
+                    message.chat.id,
+                    "❌ Операция отменена",
+                    reply_markup=self.create_keyboard()
+                )
+
+        @self.bot.message_handler(func=lambda msg:
+        msg.text.startswith("Оплатить") or
+        msg.text.endswith("руб.") or
+        msg.text == "Другая сумма" or
+        msg.text.replace('.', '').replace(',', '').isdigit())
+        async def process_payment(message):
+            if message.chat.id != self.chat_id:
+                return
+
+            text = message.text
+
+            # Определяем сумму платежа
+            if text == "Другая сумма":
+                await self.bot.send_message(
+                    message.chat.id,
+                    "💳 Введите сумму для оплаты в рублях:",
+                    reply_markup=types.ForceReply(selective=True)
+                )
+                return
+
+            if text == "Отмена":
+                await cancel_payment(message)
+                return
+
+            try:
+                # Пытаемся извлечь сумму из текста
+                if "Оплатить" in text:
+                    amount = float(text.split()[1])
+                elif "руб." in text:
+                    amount = float(text.split()[0])
+                else:
+                    amount = float(text.replace(',', '.'))
+
+                if amount <= 0:
+                    raise ValueError("Сумма должна быть положительной")
+
+                # Генерируем QR-код
+                await self.bot.send_chat_action(message.chat.id, 'upload_photo')
+                qr_img = self.generate_payment_qr(amount, TIS_LOGIN)
+
+                # Формируем инструкцию
+                instructions = (
+                    "📲 *Как оплатить:*\n\n"
+                    "1. Откройте приложение вашего банка (Сбербанк, Тинькофф, ВТБ и др.)\n"
+                    "2. Выберите раздел 'Платежи по QR-коду'\n"
+                    "3. Наведите камеру на QR-код\n"
+                    "4. Подтвердите платеж\n\n"
+                    f"💳 *Сумма к оплате:* {amount:.2f} руб.\n"
+                    f"📋 *Лицевой счет:* {TIS_LOGIN}"
+                )
+
+                await self.bot.send_photo(
+                    message.chat.id,
+                    photo=qr_img,
+                    caption=instructions,
+                    parse_mode='Markdown'
+                )
+
+                await self.bot.send_message(
+                    message.chat.id,
+                    "✅ QR-код сформирован. После оплаты баланс обновится в течение 10-15 минут.",
+                    reply_markup=self.create_keyboard()
+                )
+
+            except (ValueError, IndexError):
+                await self.bot.send_message(
+                    message.chat.id,
+                    "❌ Неверный формат суммы. Введите число, например: 500 или 250.50",
+                    reply_markup=self.create_keyboard()
                 )
 
         @self.bot.message_handler(func=lambda msg: msg.text == '🔔 Уведомления')
