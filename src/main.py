@@ -209,6 +209,7 @@ class AsyncValues:
         self.last_success = False
         self.incoming_traffic = "Н/Д"
         self.outgoing_traffic = "Н/Д"
+        self.ip_address = "Н/Д"  # Новое поле для IP-адреса
 
     async def fetch(self):
         """Основная функция получения данных"""
@@ -284,6 +285,17 @@ class AsyncValues:
                                     self.outgoing_traffic = f"{out_match.group(1)} Гб"
                                 else:
                                     self.outgoing_traffic = "Н/Д"
+
+                    # Парсим IP-адрес
+                    activity_data = html.select(".lkInfoTable:nth-of-type(2) tr:nth-child(2) td:nth-child(2)")
+                    if activity_data:
+                        activity_text = activity_data[0].get_text(strip=True)
+                        # Ищем IP-адрес в формате XXX.XXX.XXX.XXX
+                        ip_match = re.search(r'IP:(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})', activity_text)
+                        if ip_match:
+                            self.ip_address = ip_match.group(1)
+                        else:
+                            self.ip_address = "Н/Д"
 
                     self.last_success = True
                     return True
@@ -430,6 +442,7 @@ class TisDialogBot:
                     status_message = (
                         f"🌐 *Статус подключения*\n\n"
                         f"{status_icon} *Состояние:* {self.values.status}\n"
+                        f"🌐 *IP-адрес:* `{self.values.ip_address}`\n"
                         f"💰 *Баланс:* {self.values.money}\n"
                         f"🚀 *Скорость:* {self.values.speed}\n"
                         f"📊 *Остаток трафика:* {self.values.traffic_str}\n"
