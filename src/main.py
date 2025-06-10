@@ -26,12 +26,6 @@ BOT_TOKEN = os.getenv('BOT_TOKEN', '')
 CHAT_ID = int(os.getenv('CHAT_ID', '0'))
 TIS_LOGIN = os.getenv('TIS_LOGIN', '')
 TIS_PASSWORD = os.getenv('TIS_PASSWORD', '')
-TIS_PAYEE_NAME = os.getenv('TIS_PAYEE_NAME', '')
-TIS_INN = os.getenv('TIS_INN', '')
-TIS_ACCOUNT = os.getenv('TIS_ACCOUNT', '')
-TIS_BANK_BIC = os.getenv('TIS_BANK_BIC', '')
-TIS_BANK_NAME = os.getenv('TIS_BANK_NAME', '')
-TIS_COR_ACCOUNT = os.getenv('TIS_COR_ACCOUNT', '')
 
 # Проверка обязательных переменных
 if not BOT_TOKEN or not CHAT_ID or not TIS_LOGIN or not TIS_PASSWORD:
@@ -482,7 +476,7 @@ class TisDialogBot:
         markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
         btn_status = types.KeyboardButton('📊 Статус подключения')
         btn_traffic = types.KeyboardButton('🌐 Остаток трафика')
-        btn_payment = types.KeyboardButton('💳 Оплатить')  # Новая кнопка
+        btn_payment = types.KeyboardButton('💳 Оплатить')
         btn_settings = types.KeyboardButton('⚙️ Настройки')
         btn_refresh = types.KeyboardButton('🔄 Обновить данные')
         btn_notifications = types.KeyboardButton('🔔 Уведомления')
@@ -490,31 +484,32 @@ class TisDialogBot:
         return markup
 
     def generate_payment_qr(self, amount, personal_account):
-        """Генерация QR-кода для оплаты по СБП"""
-        # Форматируем данные для СБП QR
-        sbp_data = f"""
-        ST00012
-        Name={TIS_PAYEE_NAME}
-        PersonalAcc={TIS_ACCOUNT}
-        BankName={TIS_BANK_NAME}
-        BIC={TIS_BANK_BIC}
-        CorrespAcc={TIS_COR_ACCOUNT}
-        INN={TIS_INN}
-        KPP=0
-        PayeeINN={TIS_INN}
-        Purpose=Оплата интернет-услуг, л/с {personal_account}
-        Sum={amount * 100:.0f}
-        PersAcc={personal_account}
-        """.strip().replace('\n', '|')
+        """Генерация QR-кода для оплаты по СБП с реальными реквизитами"""
+        # Форматируем данные для СБП QR согласно стандарту
+        sbp_data = [
+            "ST00012",
+            "Name=ООО ТИС - ДИАЛОГ",
+            f"PersonalAcc=40702810420230000176",
+            "BankName=КАЛИНИНГРАДСКОЕ ОТДЕЛЕНИЕ N8626 ПАО СБЕРБАНК",
+            f"BIC=042748634",
+            f"CorrespAcc=30101810100000000634",
+            f"PayeeINN=3908602823",
+            f"Purpose=Оплата интернет услуг л/с {personal_account}",
+            f"Sum={int(amount * 100)}",  # Сумма в копейках
+            f"PersAcc={personal_account}"
+        ]
+
+        # Собираем строку с разделителем "|" без лишних пробелов
+        sbp_string = "|".join(sbp_data)
 
         # Создаем QR-код
         qr = qrcode.QRCode(
             version=1,
-            error_correction=qrcode.constants.ERROR_CORRECT_L,
-            box_size=10,
+            error_correction=qrcode.constants.ERROR_CORRECT_M,
+            box_size=6,
             border=4,
         )
-        qr.add_data(sbp_data)
+        qr.add_data(sbp_string)
         qr.make(fit=True)
 
         img = qr.make_image(fill_color="black", back_color="white")
@@ -669,7 +664,7 @@ class TisDialogBot:
         msg.text.startswith("Оплатить") or
         msg.text.endswith("руб.") or
         msg.text == "Другая сумма" or
-        msg.text.replace('.', '').replace(',', '').isdigit())
+        re.match(r'^\d+([.,]\d{1,2})?$', msg.text))
         async def process_payment(message):
             if message.chat.id != self.chat_id:
                 return
@@ -680,7 +675,7 @@ class TisDialogBot:
             if text == "Другая сумма":
                 await self.bot.send_message(
                     message.chat.id,
-                    "💳 Введите сумму для оплаты в рублях:",
+                    "💳 Введите сумму для оплаты в рублях (например: 500.50):",
                     reply_markup=types.ForceReply(selective=True)
                 )
                 return
@@ -692,14 +687,25 @@ class TisDialogBot:
             try:
                 # Пытаемся извлечь сумму из текста
                 if "Оплатить" in text:
-                    amount = float(text.split()[1])
+                    amount_str = text.split()[1]
+                    amount = float(amount_str.replace(',', '.'))
                 elif "руб." in text:
-                    amount = float(text.split()[0])
+                    amount_str = text.split()[0]
+                    amount = float(amount_str.replace(',', '.'))
                 else:
                     amount = float(text.replace(',', '.'))
 
                 if amount <= 0:
                     raise ValueError("Сумма должна быть положительной")
+
+                # Проверяем минимальную сумму
+                if amount < 1:
+                    await self.bot.send_message(
+                        message.chat.id,
+                        "❌ Минимальная сумма оплаты - 1 рубль",
+                        reply_markup=self.create_keyboard()
+                    )
+                    return
 
                 # Генерируем QR-код
                 await self.bot.send_chat_action(message.chat.id, 'upload_photo')
@@ -711,9 +717,10 @@ class TisDialogBot:
                     "1. Откройте приложение вашего банка (Сбербанк, Тинькофф, ВТБ и др.)\n"
                     "2. Выберите раздел 'Платежи по QR-коду'\n"
                     "3. Наведите камеру на QR-код\n"
-                    "4. Подтвердите платеж\n\n"
+                    "4. Проверьте реквизиты и подтвердите платеж\n\n"
                     f"💳 *Сумма к оплате:* {amount:.2f} руб.\n"
-                    f"📋 *Лицевой счет:* {TIS_LOGIN}"
+                    f"📋 *Лицевой счет:* {TIS_LOGIN}\n"
+                    f"🏢 *Получатель:* ООО ТИС - ДИАЛОГ"
                 )
 
                 await self.bot.send_photo(
@@ -725,7 +732,13 @@ class TisDialogBot:
 
                 await self.bot.send_message(
                     message.chat.id,
-                    "✅ QR-код сформирован. После оплаты баланс обновится в течение 10-15 минут.",
+                    "✅ QR-код сформирован. После оплаты баланс обновится в течение 10-15 минут.\n"
+                    "Реквизиты получателя:\n"
+                    "🔹 ИНН: 3908602823\n"
+                    "🔹 Расчетный счет: 40702810420230000176\n"
+                    "🔹 БИК: 042748634\n"
+                    "🔹 Банк: КАЛИНИНГРАДСКОЕ ОТДЕЛЕНИЕ N8626 ПАО СБЕРБАНК\n"
+                    "🔹 Корр. счет: 30101810100000000634",
                     reply_markup=self.create_keyboard()
                 )
 

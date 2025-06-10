@@ -8,12 +8,9 @@ services:
       - CHAT_ID=${CHAT_ID}
       - TIS_LOGIN=${TIS_LOGIN}
       - TIS_PASSWORD=${TIS_PASSWORD}
-      - TIS_PAYEE_NAME=${TIS_PAYEE_NAME}
-      - TIS_INN=${TIS_INN}
-      - TIS_ACCOUNT=${TIS_ACCOUNT}
-      - TIS_BANK_BIC=${TIS_BANK_BIC}
-      - TIS_BANK_NAME=${TIS_BANK_NAME}
-      - TIS_COR_ACCOUNT=${TIS_COR_ACCOUNT}
+      - TRAFFIC_CHECK_INTERVAL=${TRAFFIC_CHECK_INTERVAL}
+      - NOTIFICATION_CHECK_INTERVAL=${NOTIFICATION_CHECK_INTERVAL}
+      - TRAFFIC_WARNING_THRESHOLD=${TRAFFIC_WARNING_THRESHOLD}
 
     volumes:
            - ./data:/app/data  # Монтируем папку для сохранения резервных копий
