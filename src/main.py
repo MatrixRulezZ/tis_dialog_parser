@@ -288,15 +288,11 @@ class AsyncValues:
                     tables = html.select('.lkInfoTable')
 
                     # Первая таблица: основная информация
-                    if tables:
+                    if len(tables) > 0:
                         rows = tables[0].select('tr')
-                        if len(rows) >= 5:
-                            # Скорость
-                            speed_cell = rows[0].select('td')
-                            if len(speed_cell) > 1:
-                                self.speed = speed_cell[1].get_text(strip=True)
 
-                            # Баланс
+                        # Строка 4: Баланс (индекс 3)
+                        if len(rows) > 3:
                             money_cell = rows[3].select('td')
                             if len(money_cell) > 1:
                                 self.money = money_cell[1].get_text(strip=True)
@@ -307,41 +303,45 @@ class AsyncValues:
                                 except (ValueError, TypeError):
                                     self.balance = 0.0
 
-                            # Статус
+                        # Строка 5: Статус подключения (индекс 4)
+                        if len(rows) > 4:
                             status_cell = rows[4].select('td')
                             if len(status_cell) > 1:
                                 self.status = status_cell[1].get_text(strip=True)
 
-                    # Вторая таблица: трафик и активность
+                    # Вторая таблица: техническая информация
                     if len(tables) > 1:
                         rows = tables[1].select('tr')
-                        if len(rows) >= 3:
-                            # Скорость (если не нашли в первой таблице)
-                            if self.speed == "Н/Д" and len(rows) > 0:
-                                speed_cell = rows[0].select('td')
-                                if len(speed_cell) > 1:
-                                    self.speed = speed_cell[1].get_text(strip=True)
 
-                            # IP-адрес
-                            if len(rows) > 1:
-                                ip_cell = rows[1].select('td')
-                                if len(ip_cell) > 1:
-                                    activity_text = ip_cell[1].get_text(strip=True)
-                                    ip_match = re.search(r'IP:(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})', activity_text)
-                                    self.ip_address = ip_match.group(1) if ip_match else "Н/Д"
+                        # Строка 1: Скорость по тарифу
+                        if len(rows) > 0:
+                            speed_cell = rows[0].select('td')
+                            if len(speed_cell) > 1:
+                                self.speed = speed_cell[1].get_text(strip=True)
+                                # Очистка от дополнительной информации
+                                if 'Журнал сеансов' in self.speed:
+                                    self.speed = self.speed.split('Журнал сеансов')[0].strip()
 
-                            # Остаток трафика
-                            if len(rows) > 2:
-                                traffic_cell = rows[2].select('td')
-                                if len(traffic_cell) > 1:
-                                    traffic_text = traffic_cell[1].get_text(strip=True)
-                                    match = re.search(r'\(([\d,]+)\s*Тб\)', traffic_text)
-                                    if match:
-                                        traffic_tb = float(match.group(1).replace(',', '.'))
-                                        self.traffic_gb = traffic_tb * 1024
-                                        self.traffic_str = f"{self.traffic_gb:.2f} Гб"
+                        # Строка 2: Активность и IP
+                        if len(rows) > 1:
+                            ip_cell = rows[1].select('td')
+                            if len(ip_cell) > 1:
+                                activity_text = ip_cell[1].get_text(strip=True)
+                                ip_match = re.search(r'IP:(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})', activity_text)
+                                self.ip_address = ip_match.group(1) if ip_match else "Н/Д"
 
-                    # Трафик за период (отдельная таблица)
+                        # Строка 3: Остаток трафика
+                        if len(rows) > 2:
+                            traffic_cell = rows[2].select('td')
+                            if len(traffic_cell) > 1:
+                                traffic_text = traffic_cell[1].get_text(strip=True)
+                                match = re.search(r'\(([\d,]+)\s*Тб\)', traffic_text)
+                                if match:
+                                    traffic_tb = float(match.group(1).replace(',', '.'))
+                                    self.traffic_gb = traffic_tb * 1024
+                                    self.traffic_str = f"{self.traffic_gb:.2f} Гб"
+
+                    # Третья таблица: трафик за период
                     traffic_table = html.select_one('.lkTraficTable')
                     if traffic_table:
                         rows = traffic_table.select('tr')
@@ -510,9 +510,12 @@ class TisDialogBot:
                 success = await self.values.fetch()
 
                 if success:
+                    # Определяем смайлик для статуса подключения
+                    status_icon = "✅" if "подключен" in self.values.status.lower() else "❌"
+
                     status_message = (
                         f"🌐 *Статус подключения*\n\n"
-                        f"✅ *Состояние:* {self.values.status}\n"
+                        f"{status_icon} *Состояние:* {self.values.status}\n"
                         f"🌐 *IP-адрес:* `{self.values.ip_address}`\n"
                         f"💰 *Баланс:* {self.values.money}\n"
                         f"🚀 *Скорость:* {self.values.speed}\n"
@@ -540,8 +543,177 @@ class TisDialogBot:
                     '🚫 Доступ запрещен!'
                 )
 
-        # Остальные обработчики остаются без изменений (как в предыдущей версии)
-        # Для краткости оставим только измененные части
+        @self.bot.message_handler(func=lambda msg: msg.text == '🌐 Остаток трафика')
+        async def send_traffic_status(message):
+            if message.chat.id == self.chat_id:
+                await self.bot.send_chat_action(message.chat.id, 'typing')
+                success = await self.values.fetch()
+
+                if success:
+                    # Форматируем сообщение с иконкой
+                    await self.bot.send_message(
+                        message.chat.id,
+                        f"🌐 *Остаток трафика:*\n📊 {self.values.traffic_str}",
+                        parse_mode='Markdown',
+                        reply_markup=self.create_keyboard()
+                    )
+                else:
+                    await self.bot.send_message(
+                        message.chat.id,
+                        "❌ Не удалось получить данные о трафике. Попробуйте позже или используйте кнопку '🔄 Обновить данные'.",
+                        reply_markup=self.create_keyboard()
+                    )
+            else:
+                await self.bot.send_message(
+                    message.chat.id,
+                    '🚫 Доступ запрещен!'
+                )
+
+        @self.bot.message_handler(func=lambda msg: msg.text == '🔔 Уведомления')
+        async def show_notifications(message):
+            if message.chat.id != self.chat_id:
+                await self.bot.send_message(message.chat.id, '🚫 Доступ запрещен!')
+                return
+
+            if not notifications_store:
+                await self.bot.send_message(
+                    message.chat.id,
+                    "ℹ️ *Нет доступных уведомлений*\n\n"
+                    "Новые уведомления будут появляться здесь автоматически.",
+                    parse_mode='Markdown',
+                    reply_markup=self.create_keyboard()
+                )
+                return
+
+            # Сортируем уведомления по дате (новые сверху)
+            sorted_notifications = sorted(
+                notifications_store.values(),
+                key=lambda x: time.strptime(x['date'], '%d.%m.%Y'),
+                reverse=True
+            )
+
+            # Формируем список уведомлений
+            response = "🔔 *Последние уведомления:*\n\n"
+            for i, notif in enumerate(sorted_notifications[:5], 1):  # Показываем последние 5
+                response += f"{i}. 📅 *{notif['date']}* - {notif['subject']}\n"
+
+            # Создаем инлайн-клавиатуру для выбора уведомлений
+            markup = types.InlineKeyboardMarkup(row_width=2)
+            buttons = []
+            for i, notif in enumerate(sorted_notifications[:5], 1):
+                # Обрезаем длинные темы для кнопок
+                btn_text = notif['subject']
+                if len(btn_text) > 30:
+                    btn_text = btn_text[:27] + '...'
+                buttons.append(
+                    types.InlineKeyboardButton(
+                        f"{i}. {btn_text}",
+                        callback_data=f"notif_{notif['id']}"
+                    )
+                )
+
+            # Разбиваем кнопки на строки по 2
+            for i in range(0, len(buttons), 2):
+                if i + 1 < len(buttons):
+                    markup.add(buttons[i], buttons[i + 1])
+                else:
+                    markup.add(buttons[i])
+
+            # Кнопка для просмотра всех уведомлений
+            markup.add(types.InlineKeyboardButton("📋 Показать все уведомления", callback_data="show_all_notifs"))
+
+            await self.bot.send_message(
+                message.chat.id,
+                response,
+                parse_mode='Markdown',
+                reply_markup=markup
+            )
+
+        @self.bot.callback_query_handler(func=lambda call: call.data.startswith('notif_'))
+        async def show_notification_detail(call):
+            notif_id = call.data.split('_')[1]
+            notification = notifications_store.get(notif_id)
+
+            if not notification:
+                await self.bot.answer_callback_query(call.id, "Уведомление не найдено или устарело")
+                return
+
+            # Форматируем текст уведомления
+            response = (
+                f"🔔 *Уведомление*\n\n"
+                f"📅 *Дата:* {notification['date']}\n"
+                f"📝 *Тема:* {notification['subject']}\n\n"
+                f"ℹ️ *Текст:*\n{notification['text']}"
+            )
+
+            # Создаем кнопку "Назад"
+            markup = types.InlineKeyboardMarkup()
+            markup.add(types.InlineKeyboardButton("⬅️ Назад к списку", callback_data="back_to_notifs"))
+
+            await self.bot.edit_message_text(
+                chat_id=call.message.chat.id,
+                message_id=call.message.message_id,
+                text=response,
+                parse_mode='Markdown',
+                reply_markup=markup
+            )
+
+        @self.bot.callback_query_handler(func=lambda call: call.data == "show_all_notifs")
+        async def show_all_notifications(call):
+            if not notifications_store:
+                await self.bot.answer_callback_query(call.id, "Нет доступных уведомлений")
+                return
+
+            # Сортируем уведомления по дате (новые сверху)
+            sorted_notifications = sorted(
+                notifications_store.values(),
+                key=lambda x: time.strptime(x['date'], '%d.%m.%Y'),
+                reverse=True
+            )
+
+            # Формируем полный список уведомлений
+            response = "🔔 *Все уведомления:*\n\n"
+            for notif in sorted_notifications:
+                response += f"▫️ 📅 *{notif['date']}* - {notif['subject']}\n"
+
+            # Создаем кнопку "Назад"
+            markup = types.InlineKeyboardMarkup()
+            markup.add(types.InlineKeyboardButton("⬅️ Назад", callback_data="back_to_notifs"))
+
+            await self.bot.edit_message_text(
+                chat_id=call.message.chat.id,
+                message_id=call.message.message_id,
+                text=response,
+                parse_mode='Markdown',
+                reply_markup=markup
+            )
+
+        @self.bot.callback_query_handler(func=lambda call: call.data == "back_to_notifs")
+        async def back_to_notifications(call):
+            # Просто повторно вызываем обработчик кнопки уведомлений
+            await show_notifications(call.message)
+
+        @self.bot.message_handler(func=lambda msg: msg.text == '⚙️ Настройки')
+        async def send_settings(message):
+            if message.chat.id == self.chat_id:
+                await self.bot.send_message(
+                    message.chat.id,
+                    "⚙️ *Настройки мониторинга*\n\n"
+                    "• ⏱️ *Проверка трафика:* Каждые 30 минут\n"
+                    "• 🔔 *Уведомления при:*\n"
+                    "  - Остатке трафика < 100 Гб\n"
+                    "  - Отрицательном балансе\n"
+                    "  - Новых сообщениях в ЛК (проверка раз в 6 часов)\n"
+                    f"• 💾 *Резервное копирование:* {len(notifications_store)} уведомлений сохранено\n\n"
+                    "Для изменения параметров обратитесь к администратору.",
+                    parse_mode='Markdown',
+                    reply_markup=self.create_keyboard()
+                )
+            else:
+                await self.bot.send_message(
+                    message.chat.id,
+                    '🚫 Доступ запрещен!'
+                )
 
         @self.bot.message_handler(func=lambda msg: msg.text == '🔄 Обновить данные')
         async def refresh_data(message):
