@@ -337,11 +337,15 @@ class AsyncValues:
                             traffic_cell = rows[2].select('td')
                             if len(traffic_cell) > 1:
                                 traffic_text = traffic_cell[1].get_text(strip=True)
-                                match = re.search(r'\(([\d,]+)\s*Тб\)', traffic_text)
+                                match = re.search(r'\(([\d,.]+)\s*(Гб|Тб)\)', traffic_text)
                                 if match:
-                                    traffic_tb = float(match.group(1).replace(',', '.'))
-                                    self.traffic_gb = traffic_tb * 1024
+                                    value = float(match.group(1).replace(',', '.'))
+                                    unit = match.group(2)
+                                    self.traffic_gb = value * 1024 if unit == 'Тб' else value
                                     self.traffic_str = f"{self.traffic_gb:.2f} Гб"
+                                else:
+                                    self.traffic_gb = 0.0
+                                    self.traffic_str = "Н/Д"
 
                     # Третья таблица: трафик за период
                     traffic_table = html.select_one('.lkTraficTable')
