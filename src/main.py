@@ -26,9 +26,6 @@ BOT_TOKEN = os.getenv('BOT_TOKEN', '')
 CHAT_ID = int(os.getenv('CHAT_ID', '0'))
 TIS_LOGIN = os.getenv('TIS_LOGIN', '')
 TIS_PASSWORD = os.getenv('TIS_PASSWORD', '')
-TRAFFIC_WARNING_THRESHOLD = float(os.getenv('TRAFFIC_WARNING_THRESHOLD', '100'))
-TRAFFIC_CHECK_INTERVAL = int(os.getenv('TRAFFIC_CHECK_INTERVAL', '1800'))  # 30 минут
-NOTIFICATION_CHECK_INTERVAL = int(os.getenv('NOTIFICATION_CHECK_INTERVAL', '21600'))  # 6 часов
 
 # Проверка обязательных переменных
 if not BOT_TOKEN or not CHAT_ID or not TIS_LOGIN or not TIS_PASSWORD:
@@ -101,11 +98,6 @@ async def login(session):
 
     try:
         async with session.post(login_url, data=data, headers=headers) as response:
-            if response.status == 503:
-                logger.warning("Сервер недоступен (503), повтор через 60 секунд...")
-                await asyncio.sleep(60)
-                return await login(session)  # Повторная попытка
-
             if response.status != 200:
                 logger.error(f"Ошибка входа: статус {response.status}")
                 return False
@@ -142,21 +134,17 @@ async def cached_fetch(session, url, cache_ttl=300):
                 return f.read()
 
     # Если кэш устарел или отсутствует, делаем запрос
-    try:
-        async with session.get(url) as response:
-            if response.status != 200:
-                return None
+    async with session.get(url) as response:
+        if response.status != 200:
+            return None
 
-            content = await response.text(encoding='windows-1251')
+        content = await response.text(encoding='windows-1251')
 
-            # Сохраняем в кэш
-            with open(cache_file, 'w', encoding='windows-1251') as f:
-                f.write(content)
+        # Сохраняем в кэш
+        with open(cache_file, 'w', encoding='windows-1251') as f:
+            f.write(content)
 
-            return content
-    except Exception as e:
-        logger.error(f"Ошибка при запросе {url}: {e}")
-        return None
+        return content
 
 
 async def fetch_notifications(session):
@@ -349,29 +337,11 @@ class AsyncValues:
                             traffic_cell = rows[2].select('td')
                             if len(traffic_cell) > 1:
                                 traffic_text = traffic_cell[1].get_text(strip=True)
-                                # Обновленное регулярное выражение
-                                match = re.search(r'\(([\d,.]+)\s*(Тб|Гб)\)', traffic_text)
+                                match = re.search(r'\(([\d,]+)\s*Тб\)', traffic_text)
                                 if match:
-                                    traffic_value = float(match.group(1).replace(',', '.'))
-                                    unit = match.group(2)
-                                    if unit == 'Тб':
-                                        self.traffic_gb = traffic_value * 1024
-                                    else:
-                                        self.traffic_gb = traffic_value
+                                    traffic_tb = float(match.group(1).replace(',', '.'))
+                                    self.traffic_gb = traffic_tb * 1024
                                     self.traffic_str = f"{self.traffic_gb:.2f} Гб"
-                                else:
-                                    # Альтернативный парсинг
-                                    alt_match = re.search(r'([\d,.]+)\s*(Тб|Гб)', traffic_text)
-                                    if alt_match:
-                                        traffic_value = float(alt_match.group(1).replace(',', '.'))
-                                        unit = alt_match.group(2)
-                                        if unit == 'Тб':
-                                            self.traffic_gb = traffic_value * 1024
-                                        else:
-                                            self.traffic_gb = traffic_value
-                                        self.traffic_str = f"{self.traffic_gb:.2f} Гб"
-                                    else:
-                                        self.traffic_str = traffic_text
 
                     # Третья таблица: трафик за период
                     traffic_table = html.select_one('.lkTraficTable')
@@ -412,8 +382,8 @@ async def check_notifications(bot, chat_id):
     try:
         while True:
             current_time = time.time()
-            need_traffic_check = current_time - last_traffic_check > TRAFFIC_CHECK_INTERVAL
-            need_notification_check = current_time - last_notification_check > NOTIFICATION_CHECK_INTERVAL
+            need_traffic_check = current_time - last_traffic_check > 1800  # 30 минут
+            need_notification_check = current_time - last_notification_check > 21600  # 6 часов
 
             # Если ничего не нужно проверять, ждем
             if not need_traffic_check and not need_notification_check:
@@ -442,9 +412,9 @@ async def check_notifications(bot, chat_id):
                     last_traffic_check = current_time
 
                     # Проверка условий для уведомлений
-                    if values.traffic_gb < TRAFFIC_WARNING_THRESHOLD:
+                    if values.traffic_gb < 100:
                         # Отправляем только если состояние изменилось
-                        if not cache_values or cache_values.traffic_gb >= TRAFFIC_WARNING_THRESHOLD:
+                        if not cache_values or cache_values.traffic_gb >= 100:
                             await bot.send_message(
                                 chat_id,
                                 f"⚠️ *Внимание! Осталось мало трафика*\n📊 Остаток: {values.traffic_gb:.2f} Гб",
@@ -497,7 +467,7 @@ async def check_notifications(bot, chat_id):
 
 class TisDialogBot:
     def __init__(self):
-        self.bot = AsyncTeleBot(BOT_TOKEN, parse_mode='Markdown', timeout=60)
+        self.bot = AsyncTeleBot(BOT_TOKEN, parse_mode='Markdown')
         self.chat_id = CHAT_ID
         self.values = AsyncValues()
         self.setup_handlers()
@@ -520,7 +490,7 @@ class TisDialogBot:
             "ST00012",
             "Name=ООО ТИС - ДИАЛОГ",
             f"PersonalAcc=40702810420230000176",
-            "BankName=КАЛИНИНГРАДСКОЕ ОТДЕЛИЕ N8626 ПАО СБЕРБАНК",
+            "BankName=КАЛИНИНГРАДСКОЕ ОТДЕЛЕНИЕ N8626 ПАО СБЕРБАНК",
             f"BIC=042748634",
             f"CorrespAcc=30101810100000000634",
             f"PayeeINN=3908602823",
@@ -623,7 +593,7 @@ class TisDialogBot:
                     # Форматируем сообщение с иконкой
                     await self.bot.send_message(
                         message.chat.id,
-                        f"🌐 *Остаток трафика:*\n📊 {self.traffic_str}",
+                        f"🌐 *Остаток трафика:*\n📊 {self.values.traffic_str}",
                         parse_mode='Markdown',
                         reply_markup=self.create_keyboard()
                     )
@@ -767,7 +737,7 @@ class TisDialogBot:
                     "🔹 ИНН: 3908602823\n"
                     "🔹 Расчетный счет: 40702810420230000176\n"
                     "🔹 БИК: 042748634\n"
-                    "🔹 Банк: КАЛИНИНГРАДСКОЕ ОТДЕЛИЕ N8626 ПАО СБЕРБАНК\n"
+                    "🔹 Банк: КАЛИНИНГРАДСКОЕ ОТДЕЛЕНИЕ N8626 ПАО СБЕРБАНК\n"
                     "🔹 Корр. счет: 30101810100000000634",
                     reply_markup=self.create_keyboard()
                 )
@@ -798,7 +768,7 @@ class TisDialogBot:
             # Сортируем уведомления по дате (новые сверху)
             sorted_notifications = sorted(
                 notifications_store.values(),
-                key=lambda x: datetime.strptime(x['date'], '%d.%m.%Y'),
+                key=lambda x: time.strptime(x['date'], '%d.%m.%Y'),
                 reverse=True
             )
 
@@ -877,7 +847,7 @@ class TisDialogBot:
             # Сортируем уведомления по дате (новые сверху)
             sorted_notifications = sorted(
                 notifications_store.values(),
-                key=lambda x: datetime.strptime(x['date'], '%d.%m.%Y'),
+                key=lambda x: time.strptime(x['date'], '%d.%m.%Y'),
                 reverse=True
             )
 
@@ -908,12 +878,12 @@ class TisDialogBot:
             if message.chat.id == self.chat_id:
                 await self.bot.send_message(
                     message.chat.id,
-                    f"⚙️ *Настройки мониторинга*\n\n"
-                    f"• ⏱️ *Проверка трафика:* Каждые {TRAFFIC_CHECK_INTERVAL // 60} минут\n"
-                    f"• 🔔 *Уведомления при:*\n"
-                    f"  - Остатке трафика < {TRAFFIC_WARNING_THRESHOLD} Гб\n"
-                    f"  - Отрицательном балансе\n"
-                    f"  - Новых сообщениях в ЛК (проверка раз в {NOTIFICATION_CHECK_INTERVAL // 3600} часов)\n"
+                    "⚙️ *Настройки мониторинга*\n\n"
+                    "• ⏱️ *Проверка трафика:* Каждые 30 минут\n"
+                    "• 🔔 *Уведомления при:*\n"
+                    "  - Остатке трафика < 100 Гб\n"
+                    "  - Отрицательном балансе\n"
+                    "  - Новых сообщениях в ЛК (проверка раз в 6 часов)\n"
                     f"• 💾 *Резервное копирование:* {len(notifications_store)} уведомлений сохранено\n\n"
                     "Для изменения параметров обратитесь к администратору.",
                     parse_mode='Markdown',
@@ -947,17 +917,7 @@ class TisDialogBot:
         # Запускаем фоновую задачу для уведомлений
         asyncio.create_task(check_notifications(self.bot, self.chat_id))
         logger.info("Бот запущен и мониторинг активирован")
-
-        # Запуск с обработкой сетевых ошибок
-        while True:
-            try:
-                await self.bot.infinity_polling(timeout=30, long_polling_timeout=30)
-            except aiohttp.ClientError as e:
-                logger.error(f"Сетевая ошибка: {e}, перезапуск через 10 секунд")
-                await asyncio.sleep(10)
-            except Exception as e:
-                logger.error(f"Критическая ошибка: {e}, перезапуск через 30 секунд")
-                await asyncio.sleep(30)
+        await self.bot.infinity_polling()
 
 
 async def main():
