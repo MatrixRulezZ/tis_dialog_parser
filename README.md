@@ -1,5 +1,12 @@
-This is a a data-parser if the internet 
-provider which shows information such as:
--- money
--- traffic
--- speed of the internet connection
+Перед началом использования следует создать файл ".env" в папке проекта, где будут храниться креды от учеток и чата телеграм
+
+Вот содержание файла ."env":
+
+BOT_TOKEN="ТОКЕН_БОТА_БОТФАЗЕР"
+CHAT_ID="ВАШ_ID_ТЕЛЕГРАМ"
+TIS_LOGIN="ЛОГИН_ОТ_ЛК_ДИАЛОГ"
+TIS_PASSWORD="ПАРОЛЬ_ОТ_ЛК_ДИАЛОГ"
+
+После этого требуется запустить docker-compose up -d --build
+Контейнер соберется. 
+Чтобы "убить контейнер" -- docker-compose down
