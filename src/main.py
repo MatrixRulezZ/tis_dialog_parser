@@ -18,6 +18,8 @@ if not BOT_TOKEN:
 
 DB_FILE = "tis_users.db"
 
+# ... (все функции init_db, get_user, save_user, update_user_stats остаются без изменений) ...
+
 def init_db():
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
@@ -81,18 +83,31 @@ class TISClient:
         self.session = None
 
     async def login(self):
+        logger.info("[TIS] login() started")
         try:
             if self.session:
+                logger.info("[TIS] closing old session")
                 await self.session.close()
+            else:
+                logger.info("[TIS] no old session, creating new")
+
             self.session = aiohttp.ClientSession()
+            logger.info("[TIS] session created")
+
             data = {"login": self.login, "passv": self.password, "remember": "1"}
+            logger.info("[TIS] sending POST to login")
+
             async with self.session.post("https://stats.tis-dialog.ru/index.php", data=data):
                 pass
+
+            logger.info("[TIS] POST done, sending GET to check login")
             async with self.session.get("https://stats.tis-dialog.ru/index.php") as resp:
                 text = await resp.text(encoding='windows-1251', errors='ignore')
+                logger.info("[TIS] GET done, checking result")
                 return "Выйти" in text
+
         except Exception as e:
-            logger.error(f"Login error: {e}")
+            logger.error(f"[TIS] Login error: {e}")
             return False
 
     def _get_value(self, soup, label):
@@ -104,6 +119,7 @@ class TISClient:
         return "Н/Д"
 
     async def fetch_data(self):
+        # (оставь без изменений)
         try:
             if not self.session or self.session.closed:
                 if not await self.login():
@@ -162,6 +178,8 @@ class TISClient:
     async def close(self):
         if self.session:
             await self.session.close()
+
+# ... (весь остальной код бота остаётся таким же, как в предыдущем сообщении) ...
 
 bot = AsyncTeleBot(BOT_TOKEN)
 user_states = {}
@@ -237,6 +255,9 @@ async def registration_handler(message):
         if user_id in user_states:
             del user_states[user_id]
         await bot.send_message(message.chat.id, "Произошла ошибка при регистрации. Попробуйте ещё раз.")
+
+# Остальные обработчики (status, pay, refresh, background_monitor, main) — без изменений
+# (я сократил их здесь для brevity, но они должны остаться точно такими же, как в предыдущем сообщении)
 
 @bot.message_handler(func=lambda m: m.text == "📊 Статус")
 async def status(message):
