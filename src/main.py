@@ -195,39 +195,48 @@ async def registration_handler(message):
     user_id = message.from_user.id
     state = user_states.get(user_id)
 
-    # Защита от плохого состояния
+    logger.info(f"[REG] Пользователь {user_id} отправил сообщение. Текущее состояние: {state}")
+
     if not state or not isinstance(state, dict):
         if user_id in user_states:
             del user_states[user_id]
-        await bot.send_message(message.chat.id, "Произошла ошибка регистрации. Начните заново с /start")
+        await bot.send_message(message.chat.id, "Ошибка состояния регистрации. Начните заново командой /start")
         return
 
-    if state.get("step") == "login":
-        state["login"] = message.text.strip()
-        state["step"] = "password"
-        await bot.send_message(message.chat.id, "Теперь введи **пароль**:")
+    try:
+        if state.get("step") == "login":
+            state["login"] = message.text.strip()
+            state["step"] = "password"
+            logger.info(f"[REG] Логин сохранён, переходим к паролю")
+            await bot.send_message(message.chat.id, "Теперь введи **пароль**:")
 
-    elif state.get("step") == "password":
-        login = state.get("login")
-        password = message.text.strip()
+        elif state.get("step") == "password":
+            login = state.get("login")
+            password = message.text.strip()
 
-        if not login:
-            await bot.send_message(message.chat.id, "Ошибка: логин не найден. Начните регистрацию заново.")
+            if not login:
+                await bot.send_message(message.chat.id, "Ошибка: логин не найден. Начните регистрацию заново.")
+                del user_states[user_id]
+                return
+
+            logger.info(f"[REG] Пытаемся войти с логином {login}")
+            client = TISClient(login, password)
+            success = await client.login()
+            await client.close()
+
+            if success:
+                save_user(user_id, message.chat.id, login, password)
+                del user_states[user_id]
+                await bot.send_message(message.chat.id, "✅ Учётная запись успешно подключена!")
+                await show_menu(message.chat.id)
+            else:
+                await bot.send_message(message.chat.id, "❌ Не удалось войти. Проверь логин и пароль.")
+                del user_states[user_id]
+    except Exception as e:
+        logger.error(f"[REG] Ошибка в обработчике регистрации: {e}")
+        if user_id in user_states:
             del user_states[user_id]
-            return
-
-        client = TISClient(login, password)
-        success = await client.login()
-        await client.close()
-
-        if success:
-            save_user(user_id, message.chat.id, login, password)
-            del user_states[user_id]
-            await bot.send_message(message.chat.id, "✅ Учётная запись успешно подключена!")
-            await show_menu(message.chat.id)
-        else:
-            await bot.send_message(message.chat.id, "❌ Не удалось войти. Проверь логин и пароль.")
-            del user_states[user_id]
+        await bot.send_message(message.chat.id, "Произошла ошибка при регистрации. Попробуйте ещё раз.")
 
 @bot.message_handler(func=lambda m: m.text == "📊 Статус")
 async def status(message):
