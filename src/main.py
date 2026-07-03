@@ -29,7 +29,8 @@ def init_db():
             tis_password TEXT NOT NULL,
             last_balance REAL DEFAULT 0,
             last_traffic_gb REAL DEFAULT 0,
-            last_ip TEXT DEFAULT ''
+            last_ip TEXT DEFAULT '',
+            last_notification_date TEXT DEFAULT ''
         )
     ''')
     conn.commit()
@@ -49,7 +50,8 @@ def get_user(telegram_id):
             "tis_password": row[3],
             "last_balance": row[4],
             "last_traffic_gb": row[5],
-            "last_ip": row[6]
+            "last_ip": row[6],
+            "last_notification_date": row[7] or ""
         }
     return None
 
@@ -69,6 +71,13 @@ def update_user_stats(telegram_id, balance, traffic_gb, ip):
     cursor.execute('''
         UPDATE users SET last_balance=?, last_traffic_gb=?, last_ip=? WHERE telegram_id=?
     ''', (balance, traffic_gb, ip, telegram_id))
+    conn.commit()
+    conn.close()
+
+def update_last_notification(telegram_id, date_str):
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute('UPDATE users SET last_notification_date=? WHERE telegram_id=?', (date_str, telegram_id))
     conn.commit()
     conn.close()
 
@@ -95,6 +104,86 @@ class TISClient:
             logger.error(f"Login error: {e}")
             return False
 
+    async def get_notifications(self):
+        try:
+            if not self.session or self.session.closed:
+                if not await self.login():
+                    return []
+            url = f"https://stats.tis-dialog.ru/index.php?mod=msg&phnumber={self.tis_login}"
+            async with self.session.get(url) as resp:
+                html = await resp.text(encoding='windows-1251', errors='ignore')
+            soup = BS(html, 'html.parser')
+            notifications = []
+            for div in soup.select('.contentBlock > div[style*="margin-bottom"]'):
+                text = div.get_text(" ", strip=True)
+                if text:
+                    notifications.append(text)
+            return notifications
+        except Exception as e:
+            logger.error(f"get_notifications error: {e}")
+            return []
+
+    async def get_payments(self, limit=12):
+        try:
+            if not self.session or self.session.closed:
+                if not await self.login():
+                    return []
+            url = f"https://stats.tis-dialog.ru/index.php?mod=payments&phnumber={self.tis_login}"
+            async with self.session.get(url) as resp:
+                html = await resp.text(encoding='windows-1251', errors='ignore')
+            soup = BS(html, 'html.parser')
+            payments = []
+            table = soup.select_one('.lkTraficTable')
+            if table:
+                rows = table.select('tr')[1:]
+                for row in rows[:limit]:
+                    tds = row.select('td')
+                    if len(tds) >= 3:
+                        date = tds[0].get_text(strip=True)
+                        amount = tds[1].get_text(strip=True)
+                        desc = tds[2].get_text(strip=True)
+                        payments.append(f"{date} | {amount} | {desc}")
+            return payments
+        except Exception as e:
+            logger.error(f"get_payments error: {e}")
+            return []
+
+    async def get_promised_payment_info(self):
+        try:
+            if not self.session or self.session.closed:
+                if not await self.login():
+                    return {"available": False, "balance": 0}
+            url = f"https://stats.tis-dialog.ru/index.php?mod=promisedpay&phnumber={self.tis_login}"
+            async with self.session.get(url) as resp:
+                html = await resp.text(encoding='windows-1251', errors='ignore')
+            text = html
+            available = "Активировать" in text
+            balance = 0
+            match = re.search(r'На счете:\s*([\d.,]+)', text)
+            if match:
+                balance = float(match.group(1).replace(',', '.'))
+            return {"available": available, "balance": balance}
+        except Exception as e:
+            logger.error(f"get_promised_payment_info error: {e}")
+            return {"available": False, "balance": 0}
+
+    async def activate_promised_payment(self):
+        try:
+            if not self.session or self.session.closed:
+                if not await self.login():
+                    return False
+            post_data = {
+                "mod": "promisedpay",
+                "modcmd": "promisedpay",
+                "chk_agree": "agree"
+            }
+            async with self.session.post("https://stats.tis-dialog.ru/index.php", data=post_data) as resp:
+                result = await resp.text(encoding='windows-1251', errors='ignore')
+                return "успешно" in result.lower() or "активирована" in result.lower()
+        except Exception as e:
+            logger.error(f"activate_promised_payment error: {e}")
+            return False
+
     def _get_value(self, soup, label):
         for table in soup.select('.lkInfoTable'):
             for row in table.select('tr'):
@@ -108,42 +197,36 @@ class TISClient:
             if not self.session or self.session.closed:
                 if not await self.login():
                     return None
-
             async with self.session.get("https://stats.tis-dialog.ru/index.php") as resp:
                 html = await resp.text(encoding='windows-1251', errors='ignore')
-
             soup = BS(html, 'html.parser')
             for a in soup.find_all("a"):
                 a.decompose()
-
             data = {
+                "tariff": self._get_value(soup, "Тарифный план"),
                 "balance_raw": self._get_value(soup, "Баланс"),
                 "status": self._get_value(soup, "Состояние"),
-                "speed": self._get_value(soup, "Скорость"),
-                "turbo": self._get_value(soup, "Остаток турбо"),
+                "speed": self._get_value(soup, "Скорость по тарифу"),
+                "turbo": self._get_value(soup, "Остаток турбо-трафика"),
+                "activity": self._get_value(soup, "Активность"),
                 "ip": "Н/Д",
-                "traffic_gb": 0.0
+                "incoming": "Н/Д",
+                "outgoing": "Н/Д",
             }
-
-            # Баланс
             try:
                 num = re.sub(r'[^\d\-.]+', '', data["balance_raw"].replace(',', '.'))
                 data["balance"] = float(num) if num else 0.0
             except:
                 data["balance"] = 0.0
-
-            # IP
-            activity = self._get_value(soup, "Журнал сеансов")
-            match = re.search(r'IP:\s*(\d{1,3}(?:\.\d{1,3}){3})', activity)
+            match = re.search(r'IP:(\d{1,3}(?:\.\d{1,3}){3})', data["activity"])
             if match:
                 data["ip"] = match.group(1)
-
-            # Турбо-трафик
-            m = re.search(r'([\d.,]+)\s*(Гб|Тб)', data["turbo"], re.I)
-            if m:
-                val = float(m.group(1).replace(',', '.'))
-                data["traffic_gb"] = val * 1024 if 'т' in m.group(2).lower() else val
-
+            traffic_table = soup.select_one('.lkTraficTable')
+            if traffic_table:
+                tds = traffic_table.select('td')
+                if len(tds) >= 2:
+                    data["incoming"] = tds[0].get_text(strip=True)
+                    data["outgoing"] = tds[1].get_text(strip=True)
             return data
         except Exception as e:
             logger.error(f"fetch_data error: {e}")
@@ -169,6 +252,7 @@ class TISClient:
 
 bot = AsyncTeleBot(BOT_TOKEN)
 user_states = {}
+promised_confirm = {}
 
 @bot.message_handler(commands=['start'])
 async def start(message):
@@ -184,7 +268,8 @@ async def start(message):
 async def show_menu(chat_id):
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
     markup.add("📊 Статус", "💳 Оплатить")
-    markup.add("🔄 Обновить данные")
+    markup.add("🔔 Уведомления", "📜 История платежей")
+    markup.add("💰 Обещанный платёж", "🔄 Обновить данные")
     await bot.send_message(chat_id, "Выбери действие:", reply_markup=markup)
 
 @bot.callback_query_handler(func=lambda call: call.data == "register")
@@ -202,23 +287,19 @@ async def registration_handler(message):
         if user_id in user_states:
             del user_states[user_id]
         return
-
     if state.get("step") == "login":
         state["login"] = message.text.strip()
         state["step"] = "password"
         await bot.send_message(message.chat.id, "Теперь введи **пароль**:")
-
     elif state.get("step") == "password":
         login = state.get("login")
         password = message.text.strip()
         if not login:
             del user_states[user_id]
             return
-
         client = TISClient(login, password)
         success = await client.login()
         await client.close()
-
         if success:
             save_user(user_id, message.chat.id, login, password)
             del user_states[user_id]
@@ -234,23 +315,107 @@ async def status(message):
     if not user:
         await bot.send_message(message.chat.id, "Сначала подключи кабинет")
         return
-
     client = TISClient(user["tis_login"], user["tis_password"])
     data = await client.fetch_data()
     await client.close()
-
     if data:
-        text = (
-            f"📊 **Статус**\n\n"
-            f"Баланс: **{data['balance_raw']}**\n"
-            f"Статус: {data['status']}\n"
-            f"Скорость: {data['speed']}\n"
-            f"Остаток турбо: {data['turbo']}\n"
-            f"IP: `{data['ip']}`"
-        )
+        text = (f"📊 **Статус**\n\n"
+                f"Тариф: **{data['tariff']}**\n"
+                f"Баланс: **{data['balance_raw']}**\n"
+                f"Статус: {data['status']}\n"
+                f"Скорость: {data['speed']}\n"
+                f"Остаток турбо: {data['turbo']}\n"
+                f"IP: `{data['ip']}`\n\n"
+                f"**Трафик за период:**\n"
+                f"Входящий: {data['incoming']}\n"
+                f"Исходящий: {data['outgoing']}")
         await bot.send_message(message.chat.id, text, parse_mode="Markdown")
     else:
         await bot.send_message(message.chat.id, "Не удалось получить данные")
+
+@bot.message_handler(func=lambda m: m.text == "🔔 Уведомления")
+async def notifications(message):
+    user = get_user(message.from_user.id)
+    if not user:
+        await bot.send_message(message.chat.id, "Сначала подключи кабинет")
+        return
+    client = TISClient(user["tis_login"], user["tis_password"])
+    notifs = await client.get_notifications()
+    await client.close()
+    if notifs:
+        text = "🔔 **Последние уведомления:**\n\n"
+        for n in notifs[:6]:
+            text += f"• {n}\n\n"
+        await bot.send_message(message.chat.id, text, parse_mode="Markdown")
+    else:
+        await bot.send_message(message.chat.id, "Уведомлений нет.")
+
+@bot.message_handler(func=lambda m: m.text == "📜 История платежей")
+async def payments(message):
+    user = get_user(message.from_user.id)
+    if not user:
+        await bot.send_message(message.chat.id, "Сначала подключи кабинет")
+        return
+    client = TISClient(user["tis_login"], user["tis_password"])
+    pays = await client.get_payments(12)
+    await client.close()
+    if pays:
+        text = "📜 **Последние платежи:**\n\n"
+        for p in pays:
+            text += f"• {p}\n"
+        await bot.send_message(message.chat.id, text)
+    else:
+        await bot.send_message(message.chat.id, "Не удалось получить историю.")
+
+@bot.message_handler(func=lambda m: m.text == "💰 Обещанный платёж")
+async def promised_payment(message):
+    user = get_user(message.from_user.id)
+    if not user:
+        await bot.send_message(message.chat.id, "Сначала подключи кабинет")
+        return
+    client = TISClient(user["tis_login"], user["tis_password"])
+    info = await client.get_promised_payment_info()
+    await client.close()
+    if info["available"]:
+        text = (f"💰 **Обещанный платёж**\n\n"
+                f"Баланс: **{info['balance']} руб.**\n\n"
+                f"Стоимость: 30 руб.\n"
+                f"Длительность: 5 дней.\n\n"
+                f"Активировать?")
+        markup = types.InlineKeyboardMarkup()
+        markup.add(types.InlineKeyboardButton("✅ Активировать", callback_data="activate_promised"))
+        markup.add(types.InlineKeyboardButton("❌ Отмена", callback_data="cancel_promised"))
+        await bot.send_message(message.chat.id, text, reply_markup=markup, parse_mode="Markdown")
+        promised_confirm[message.from_user.id] = True
+    else:
+        await bot.send_message(message.chat.id, "Обещанный платёж сейчас недоступен.")
+
+@bot.callback_query_handler(func=lambda call: call.data == "activate_promised")
+async def activate_promised(call):
+    user_id = call.from_user.id
+    if user_id not in promised_confirm:
+        await bot.answer_callback_query(call.id)
+        return
+    user = get_user(user_id)
+    if not user:
+        return
+    client = TISClient(user["tis_login"], user["tis_password"])
+    success = await client.activate_promised_payment()
+    await client.close()
+    del promised_confirm[user_id]
+    if success:
+        await bot.send_message(call.message.chat.id, "✅ Обещанный платёж активирован!")
+    else:
+        await bot.send_message(call.message.chat.id, "❌ Не удалось активировать.")
+    await bot.answer_callback_query(call.id)
+
+@bot.callback_query_handler(func=lambda call: call.data == "cancel_promised")
+async def cancel_promised(call):
+    user_id = call.from_user.id
+    if user_id in promised_confirm:
+        del promised_confirm[user_id]
+    await bot.send_message(call.message.chat.id, "Отменено.")
+    await bot.answer_callback_query(call.id)
 
 @bot.message_handler(func=lambda m: m.text == "💳 Оплатить")
 async def pay(message):
@@ -258,15 +423,13 @@ async def pay(message):
     if not user:
         await bot.send_message(message.chat.id, "Сначала подключи кабинет")
         return
-
     client = TISClient(user["tis_login"], user["tis_password"])
     qr = await client.get_qr()
     await client.close()
-
     if qr:
-        await bot.send_photo(message.chat.id, qr, caption="QR-код для оплаты (СБП)")
+        await bot.send_photo(message.chat.id, qr, caption="QR-код для оплаты")
     else:
-        await bot.send_message(message.chat.id, "Не удалось получить QR-код")
+        await bot.send_message(message.chat.id, "Не удалось получить QR.")
 
 @bot.message_handler(func=lambda m: m.text == "🔄 Обновить данные")
 async def refresh(message):
@@ -276,34 +439,39 @@ async def background_monitor():
     while True:
         try:
             conn = sqlite3.connect(DB_FILE)
-            users = conn.execute("SELECT telegram_id, chat_id, tis_login, tis_password, last_ip FROM users").fetchall()
+            users = conn.execute("SELECT telegram_id, chat_id, tis_login, tis_password, last_ip, last_notification_date FROM users").fetchall()
             conn.close()
 
-            for telegram_id, chat_id, login, password, last_ip in users:
+            for telegram_id, chat_id, login, password, last_ip, last_notif_date in users:
                 client = TISClient(login, password)
                 data = await client.fetch_data()
+
+                if data:
+                    if data["balance"] < 0:
+                        try:
+                            await bot.send_message(chat_id, "⚠️ Баланс ушёл в минус!")
+                        except:
+                            pass
+                    if data["ip"] != "Н/Д" and last_ip and data["ip"] != last_ip:
+                        try:
+                            await bot.send_message(chat_id, f"🌐 IP изменился: `{data['ip']}`", parse_mode="Markdown")
+                        except:
+                            pass
+                    update_user_stats(telegram_id, data["balance"], data["traffic_gb"], data["ip"])
+
+                notifs = await client.get_notifications()
+                if notifs:
+                    newest = notifs[0]
+                    current_date = newest[:10] if len(newest) > 10 else ""
+                    if current_date and current_date != last_notif_date:
+                        try:
+                            await bot.send_message(chat_id, f"🔔 **Новое уведомление:**\n\n{newest}")
+                            update_last_notification(telegram_id, current_date)
+                        except:
+                            pass
                 await client.close()
-
-                if not data:
-                    continue
-
-                if data["balance"] < 0:
-                    try:
-                        await bot.send_message(chat_id, "⚠️ Баланс ушёл в минус!")
-                    except:
-                        pass
-
-                if data["ip"] != "Н/Д" and last_ip and data["ip"] != last_ip:
-                    try:
-                        await bot.send_message(chat_id, f"🌐 IP изменился: `{data['ip']}`", parse_mode="Markdown")
-                    except:
-                        pass
-
-                update_user_stats(telegram_id, data["balance"], data["traffic_gb"], data["ip"])
-
         except Exception as e:
             logger.error(f"Background error: {e}")
-
         await asyncio.sleep(1800)
 
 async def main():
