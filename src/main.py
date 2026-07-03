@@ -98,7 +98,16 @@ class TISClient:
 
             async with self.session.get("https://stats.tis-dialog.ru/index.php") as resp:
                 text = await resp.text(encoding='windows-1251', errors='ignore')
-                return "Выйти" in text
+
+            # Улучшенная проверка успешного входа
+            success = (
+                "Выйти" in text or
+                "Выход" in text or
+                "Баланс" in text or
+                "lkInfoTable" in text
+            )
+            logger.info(f"[TIS] Login success check result: {success}")
+            return success
 
         except Exception as e:
             logger.error(f"[TIS] Login error: {e}")
