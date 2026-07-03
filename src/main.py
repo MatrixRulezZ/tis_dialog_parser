@@ -117,25 +117,29 @@ class TISClient:
                 a.decompose()
 
             data = {
-                "raw_balance": self._get_value(soup, "Баланс"),
+                "balance_raw": self._get_value(soup, "Баланс"),
                 "status": self._get_value(soup, "Состояние"),
+                "speed": self._get_value(soup, "Скорость"),
+                "turbo": self._get_value(soup, "Остаток турбо"),
                 "ip": "Н/Д",
                 "traffic_gb": 0.0
             }
 
+            # Баланс
             try:
-                num = re.sub(r'[^\d\-.]+', '', data["raw_balance"].replace(',', '.'))
+                num = re.sub(r'[^\d\-.]+', '', data["balance_raw"].replace(',', '.'))
                 data["balance"] = float(num) if num else 0.0
             except:
                 data["balance"] = 0.0
 
+            # IP
             activity = self._get_value(soup, "Журнал сеансов")
             match = re.search(r'IP:\s*(\d{1,3}(?:\.\d{1,3}){3})', activity)
             if match:
                 data["ip"] = match.group(1)
 
-            turbo = self._get_value(soup, "Остаток турбо")
-            m = re.search(r'([\d.,]+)\s*(Гб|Тб)', turbo, re.I)
+            # Турбо-трафик
+            m = re.search(r'([\d.,]+)\s*(Гб|Тб)', data["turbo"], re.I)
             if m:
                 val = float(m.group(1).replace(',', '.'))
                 data["traffic_gb"] = val * 1024 if 'т' in m.group(2).lower() else val
@@ -236,7 +240,14 @@ async def status(message):
     await client.close()
 
     if data:
-        text = f"📊 **Статус**\n\nБаланс: **{data['raw_balance']}**\nСтатус: {data['status']}\nIP: `{data['ip']}`"
+        text = (
+            f"📊 **Статус**\n\n"
+            f"Баланс: **{data['balance_raw']}**\n"
+            f"Статус: {data['status']}\n"
+            f"Скорость: {data['speed']}\n"
+            f"Остаток турбо: {data['turbo']}\n"
+            f"IP: `{data['ip']}`"
+        )
         await bot.send_message(message.chat.id, text, parse_mode="Markdown")
     else:
         await bot.send_message(message.chat.id, "Не удалось получить данные")
@@ -261,7 +272,6 @@ async def pay(message):
 async def refresh(message):
     await status(message)
 
-# ==================== ФОНОВАЯ ПРОВЕРКА (восстановлена) ====================
 async def background_monitor():
     while True:
         try:
@@ -277,14 +287,12 @@ async def background_monitor():
                 if not data:
                     continue
 
-                # Уведомление при отрицательном балансе
                 if data["balance"] < 0:
                     try:
                         await bot.send_message(chat_id, "⚠️ Баланс ушёл в минус!")
                     except:
                         pass
 
-                # Уведомление при смене IP
                 if data["ip"] != "Н/Д" and last_ip and data["ip"] != last_ip:
                     try:
                         await bot.send_message(chat_id, f"🌐 IP изменился: `{data['ip']}`", parse_mode="Markdown")
@@ -294,9 +302,9 @@ async def background_monitor():
                 update_user_stats(telegram_id, data["balance"], data["traffic_gb"], data["ip"])
 
         except Exception as e:
-            logger.error(f"Background monitor error: {e}")
+            logger.error(f"Background error: {e}")
 
-        await asyncio.sleep(1800)  # каждые 30 минут
+        await asyncio.sleep(1800)
 
 async def main():
     logger.info("Бот запускается...")
