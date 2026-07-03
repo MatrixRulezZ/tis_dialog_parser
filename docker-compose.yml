@@ -1,17 +1,11 @@
 version: '3.8'
 services:
   tis-bot:
-    image: tis-dialog-bot
     build: .
     environment:
       - BOT_TOKEN=${BOT_TOKEN}
       - CHAT_ID=${CHAT_ID}
-      - TIS_LOGIN=${TIS_LOGIN}
-      - TIS_PASSWORD=${TIS_PASSWORD}
-      - TRAFFIC_CHECK_INTERVAL=${TRAFFIC_CHECK_INTERVAL}
-      - NOTIFICATION_CHECK_INTERVAL=${NOTIFICATION_CHECK_INTERVAL}
-      - TRAFFIC_WARNING_THRESHOLD=${TRAFFIC_WARNING_THRESHOLD}
-
+      # Можно убрать TIS_LOGIN / TIS_PASSWORD — они теперь в БД
     volumes:
-           - ./data:/app/data  # Монтируем папку для сохранения резервных копий
+      - ./data:/app/data          # ← важно для сохранения БД
     restart: unless-stopped
