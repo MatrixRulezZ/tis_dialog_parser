@@ -105,7 +105,6 @@ class TISClient:
             return False
 
     async def get_notifications_list(self):
-        """Возвращает список уведомлений с ID"""
         try:
             if not self.session or self.session.closed:
                 if not await self.login():
@@ -121,11 +120,9 @@ class TISClient:
                     href = a_tag.get('href', '')
                     match = re.search(r'comsg=(\d+)', href)
                     if match:
-                        notif_id = match.group(1)
-                        text = div.get_text(" ", strip=True)
                         notifications.append({
-                            "id": notif_id,
-                            "short_text": text[:100] + "..." if len(text) > 100 else text
+                            "id": match.group(1),
+                            "short_text": div.get_text(" ", strip=True)[:110]
                         })
             return notifications[:6]
         except Exception as e:
@@ -142,14 +139,11 @@ class TISClient:
                 html = await resp.text(encoding='windows-1251', errors='ignore')
             soup = BS(html, 'html.parser')
             content = soup.select_one('.contentBlock')
-            if content:
-                return content.get_text("\n", strip=True)
-            return "Не удалось получить текст уведомления."
+            return content.get_text("\n", strip=True) if content else "Текст не найден."
         except Exception as e:
             logger.error(f"get_notification_full error: {e}")
             return "Ошибка при загрузке уведомления."
 
-    # Остальные методы (fetch_data, get_payments, get_promised_payment_info и т.д.) — как в предыдущей версии
     async def get_payments(self, limit=12):
         try:
             if not self.session or self.session.closed:
@@ -162,8 +156,7 @@ class TISClient:
             payments = []
             table = soup.select_one('.lkTraficTable')
             if table:
-                rows = table.select('tr')[1:]
-                for row in rows[:limit]:
+                for row in table.select('tr')[1:limit+1]:
                     tds = row.select('td')
                     if len(tds) >= 3:
                         payments.append(f"{tds[0].get_text(strip=True)} | {tds[1].get_text(strip=True)} | {tds[2].get_text(strip=True)}")
@@ -271,7 +264,7 @@ class TISClient:
 bot = AsyncTeleBot(BOT_TOKEN)
 user_states = {}
 promised_confirm = {}
-user_notifications = {}   # user_id -> список уведомлений
+user_notifications = {}
 
 @bot.message_handler(commands=['start'])
 async def start(message):
@@ -338,16 +331,22 @@ async def status(message):
     data = await client.fetch_data()
     await client.close()
     if data:
-        text = (f"📊 **Статус**\n\n"
-                f"Тариф: **{data['tariff']}**\n"
-                f"Баланс: **{data['balance_raw']}**\n"
-                f"Статус: {data['status']}\n"
-                f"Скорость: {data['speed']}\n"
-                f"Остаток турбо: {data['turbo']}\n"
-                f"IP: `{data['ip']}`\n\n"
-                f"**Трафик за период:**\n"
-                f"Входящий: {data['incoming']}\n"
-                f"Исходящий: {data['outgoing']}")
+        turbo_clean = data['turbo']
+        if '(' in turbo_clean and ')' in turbo_clean:
+            turbo_clean = turbo_clean.split('(')[1].replace(')', '').strip()
+
+        text = (
+            "📊 **Твой статус**\n\n"
+            f"📌 **Тариф:** {data['tariff']}\n"
+            f"💰 **Баланс:** {data['balance_raw']}\n"
+            f"🟢 **Состояние:** {data['status']}\n"
+            f"⚡ **Скорость:** {data['speed']}\n"
+            f"🚀 **Остаток турбо:** {turbo_clean}\n"
+            f"🌐 **IP:** `{data['ip']}`\n\n"
+            "📈 **Трафик за текущий период:**\n"
+            f"⬇️ Входящий: {data['incoming']}\n"
+            f"⬆️ Исходящий: {data['outgoing']}"
+        )
         await bot.send_message(message.chat.id, text, parse_mode="Markdown")
     else:
         await bot.send_message(message.chat.id, "Не удалось получить данные")
@@ -366,7 +365,7 @@ async def notifications(message):
         return
     user_notifications[message.from_user.id] = notifs
     markup = types.InlineKeyboardMarkup(row_width=1)
-    for i, n in enumerate(notifs):
+    for n in notifs:
         markup.add(types.InlineKeyboardButton(n["short_text"], callback_data=f"view_notif_{n['id']}"))
     markup.add(types.InlineKeyboardButton("❌ Закрыть", callback_data="close_notifications"))
     await bot.send_message(message.chat.id, "🔔 Выберите уведомление:", reply_markup=markup)
