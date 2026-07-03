@@ -104,7 +104,8 @@ class TISClient:
             logger.error(f"Login error: {e}")
             return False
 
-    async def get_notifications(self):
+    async def get_notifications_list(self):
+        """Возвращает список уведомлений с ID"""
         try:
             if not self.session or self.session.closed:
                 if not await self.login():
@@ -115,14 +116,40 @@ class TISClient:
             soup = BS(html, 'html.parser')
             notifications = []
             for div in soup.select('.contentBlock > div[style*="margin-bottom"]'):
-                text = div.get_text(" ", strip=True)
-                if text:
-                    notifications.append(text)
-            return notifications
+                a_tag = div.find('a')
+                if a_tag and 'comsg=' in str(a_tag.get('href', '')):
+                    href = a_tag.get('href', '')
+                    match = re.search(r'comsg=(\d+)', href)
+                    if match:
+                        notif_id = match.group(1)
+                        text = div.get_text(" ", strip=True)
+                        notifications.append({
+                            "id": notif_id,
+                            "short_text": text[:100] + "..." if len(text) > 100 else text
+                        })
+            return notifications[:6]
         except Exception as e:
-            logger.error(f"get_notifications error: {e}")
+            logger.error(f"get_notifications_list error: {e}")
             return []
 
+    async def get_notification_full(self, notif_id):
+        try:
+            if not self.session or self.session.closed:
+                if not await self.login():
+                    return "Ошибка загрузки."
+            url = f"https://stats.tis-dialog.ru/index.php?mod=msg&comsg={notif_id}&phnumber={self.tis_login}"
+            async with self.session.get(url) as resp:
+                html = await resp.text(encoding='windows-1251', errors='ignore')
+            soup = BS(html, 'html.parser')
+            content = soup.select_one('.contentBlock')
+            if content:
+                return content.get_text("\n", strip=True)
+            return "Не удалось получить текст уведомления."
+        except Exception as e:
+            logger.error(f"get_notification_full error: {e}")
+            return "Ошибка при загрузке уведомления."
+
+    # Остальные методы (fetch_data, get_payments, get_promised_payment_info и т.д.) — как в предыдущей версии
     async def get_payments(self, limit=12):
         try:
             if not self.session or self.session.closed:
@@ -139,13 +166,9 @@ class TISClient:
                 for row in rows[:limit]:
                     tds = row.select('td')
                     if len(tds) >= 3:
-                        date = tds[0].get_text(strip=True)
-                        amount = tds[1].get_text(strip=True)
-                        desc = tds[2].get_text(strip=True)
-                        payments.append(f"{date} | {amount} | {desc}")
+                        payments.append(f"{tds[0].get_text(strip=True)} | {tds[1].get_text(strip=True)} | {tds[2].get_text(strip=True)}")
             return payments
-        except Exception as e:
-            logger.error(f"get_payments error: {e}")
+        except:
             return []
 
     async def get_promised_payment_info(self):
@@ -163,8 +186,7 @@ class TISClient:
             if match:
                 balance = float(match.group(1).replace(',', '.'))
             return {"available": available, "balance": balance}
-        except Exception as e:
-            logger.error(f"get_promised_payment_info error: {e}")
+        except:
             return {"available": False, "balance": 0}
 
     async def activate_promised_payment(self):
@@ -172,16 +194,11 @@ class TISClient:
             if not self.session or self.session.closed:
                 if not await self.login():
                     return False
-            post_data = {
-                "mod": "promisedpay",
-                "modcmd": "promisedpay",
-                "chk_agree": "agree"
-            }
+            post_data = {"mod": "promisedpay", "modcmd": "promisedpay", "chk_agree": "agree"}
             async with self.session.post("https://stats.tis-dialog.ru/index.php", data=post_data) as resp:
                 result = await resp.text(encoding='windows-1251', errors='ignore')
                 return "успешно" in result.lower() or "активирована" in result.lower()
-        except Exception as e:
-            logger.error(f"activate_promised_payment error: {e}")
+        except:
             return False
 
     def _get_value(self, soup, label):
@@ -225,8 +242,10 @@ class TISClient:
             if traffic_table:
                 tds = traffic_table.select('td')
                 if len(tds) >= 2:
-                    data["incoming"] = tds[0].get_text(strip=True)
-                    data["outgoing"] = tds[1].get_text(strip=True)
+                    inc_match = re.search(r'\(([^)]+)\)', tds[0].get_text())
+                    out_match = re.search(r'\(([^)]+)\)', tds[1].get_text())
+                    data["incoming"] = inc_match.group(1) if inc_match else tds[0].get_text(strip=True)
+                    data["outgoing"] = out_match.group(1) if out_match else tds[1].get_text(strip=True)
             return data
         except Exception as e:
             logger.error(f"fetch_data error: {e}")
@@ -242,8 +261,7 @@ class TISClient:
                 if resp.status == 200:
                     return await resp.read()
             return None
-        except Exception as e:
-            logger.error(f"QR error: {e}")
+        except:
             return None
 
     async def close(self):
@@ -253,6 +271,7 @@ class TISClient:
 bot = AsyncTeleBot(BOT_TOKEN)
 user_states = {}
 promised_confirm = {}
+user_notifications = {}   # user_id -> список уведомлений
 
 @bot.message_handler(commands=['start'])
 async def start(message):
@@ -340,15 +359,63 @@ async def notifications(message):
         await bot.send_message(message.chat.id, "Сначала подключи кабинет")
         return
     client = TISClient(user["tis_login"], user["tis_password"])
-    notifs = await client.get_notifications()
+    notifs = await client.get_notifications_list()
     await client.close()
-    if notifs:
-        text = "🔔 **Последние уведомления:**\n\n"
-        for n in notifs[:6]:
-            text += f"• {n}\n\n"
-        await bot.send_message(message.chat.id, text, parse_mode="Markdown")
-    else:
+    if not notifs:
         await bot.send_message(message.chat.id, "Уведомлений нет.")
+        return
+    user_notifications[message.from_user.id] = notifs
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    for i, n in enumerate(notifs):
+        markup.add(types.InlineKeyboardButton(n["short_text"], callback_data=f"view_notif_{n['id']}"))
+    markup.add(types.InlineKeyboardButton("❌ Закрыть", callback_data="close_notifications"))
+    await bot.send_message(message.chat.id, "🔔 Выберите уведомление:", reply_markup=markup)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("view_notif_"))
+async def view_notification(call):
+    user_id = call.from_user.id
+    notif_id = call.data.replace("view_notif_", "")
+    user = get_user(user_id)
+    if not user:
+        await bot.answer_callback_query(call.id)
+        return
+    client = TISClient(user["tis_login"], user["tis_password"])
+    full_text = await client.get_notification_full(notif_id)
+    await client.close()
+    markup = types.InlineKeyboardMarkup()
+    markup.add(types.InlineKeyboardButton("⬅️ Назад к списку", callback_data="back_to_notifications"))
+    await bot.edit_message_text(
+        chat_id=call.message.chat.id,
+        message_id=call.message.message_id,
+        text=f"📄 **Полный текст уведомления:**\n\n{full_text}",
+        reply_markup=markup,
+        parse_mode="Markdown"
+    )
+    await bot.answer_callback_query(call.id)
+
+@bot.callback_query_handler(func=lambda call: call.data == "back_to_notifications")
+async def back_to_notifications(call):
+    user_id = call.from_user.id
+    notifs = user_notifications.get(user_id, [])
+    if not notifs:
+        await bot.edit_message_text(chat_id=call.message.chat.id, message_id=call.message.message_id, text="Уведомлений нет.")
+        return
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    for n in notifs:
+        markup.add(types.InlineKeyboardButton(n["short_text"], callback_data=f"view_notif_{n['id']}"))
+    markup.add(types.InlineKeyboardButton("❌ Закрыть", callback_data="close_notifications"))
+    await bot.edit_message_text(
+        chat_id=call.message.chat.id,
+        message_id=call.message.message_id,
+        text="🔔 Выберите уведомление:",
+        reply_markup=markup
+    )
+    await bot.answer_callback_query(call.id)
+
+@bot.callback_query_handler(func=lambda call: call.data == "close_notifications")
+async def close_notifications(call):
+    await bot.delete_message(chat_id=call.message.chat.id, message_id=call.message.message_id)
+    await bot.answer_callback_query(call.id)
 
 @bot.message_handler(func=lambda m: m.text == "📜 История платежей")
 async def payments(message):
@@ -379,8 +446,7 @@ async def promised_payment(message):
     if info["available"]:
         text = (f"💰 **Обещанный платёж**\n\n"
                 f"Баланс: **{info['balance']} руб.**\n\n"
-                f"Стоимость: 30 руб.\n"
-                f"Длительность: 5 дней.\n\n"
+                f"Стоимость: 30 руб. | Длительность: 5 дней.\n\n"
                 f"Активировать?")
         markup = types.InlineKeyboardMarkup()
         markup.add(types.InlineKeyboardButton("✅ Активировать", callback_data="activate_promised"))
@@ -441,11 +507,9 @@ async def background_monitor():
             conn = sqlite3.connect(DB_FILE)
             users = conn.execute("SELECT telegram_id, chat_id, tis_login, tis_password, last_ip, last_notification_date FROM users").fetchall()
             conn.close()
-
             for telegram_id, chat_id, login, password, last_ip, last_notif_date in users:
                 client = TISClient(login, password)
                 data = await client.fetch_data()
-
                 if data:
                     if data["balance"] < 0:
                         try:
@@ -458,10 +522,9 @@ async def background_monitor():
                         except:
                             pass
                     update_user_stats(telegram_id, data["balance"], data["traffic_gb"], data["ip"])
-
-                notifs = await client.get_notifications()
+                notifs = await client.get_notifications_list()
                 if notifs:
-                    newest = notifs[0]
+                    newest = notifs[0]["short_text"]
                     current_date = newest[:10] if len(newest) > 10 else ""
                     if current_date and current_date != last_notif_date:
                         try:
