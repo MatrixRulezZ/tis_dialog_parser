@@ -164,6 +164,7 @@ class TISClient:
             await self.session.close()
 
 bot = AsyncTeleBot(BOT_TOKEN)
+user_states = {}   # Храним состояние регистрации
 
 @bot.message_handler(commands=['start'])
 async def start(message):
@@ -174,7 +175,7 @@ async def start(message):
     else:
         markup = types.InlineKeyboardMarkup()
         markup.add(types.InlineKeyboardButton("🔗 Подключить кабинет TIS", callback_data="register"))
-        await bot.send_message(message.chat.id, "Нажми кнопку, чтобы подключить свой личный кабинет.", reply_markup=markup)
+        await bot.send_message(message.chat.id, "Нажми кнопку, чтобы подключить свой личный кабинет TIS.", reply_markup=markup)
 
 async def show_menu(chat_id):
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
@@ -184,30 +185,40 @@ async def show_menu(chat_id):
 
 @bot.callback_query_handler(func=lambda call: call.data == "register")
 async def register_start(call):
+    user_id = call.from_user.id
+    user_states[user_id] = {"step": "login"}
     await bot.send_message(call.message.chat.id, "Введите **логин** от личного кабинета TIS:")
-    bot.register_next_step_handler(call.message, process_login)
     await bot.answer_callback_query(call.id)
 
-def process_login(message):
+@bot.message_handler(func=lambda m: m.from_user.id in user_states)
+async def registration_handler(message):
     user_id = message.from_user.id
-    login = message.text.strip()
-    bot.register_next_step_handler(message, lambda m: process_password(m, login))
+    state = user_states.get(user_id)
 
-def process_password(message, login):
-    user_id = message.from_user.id
-    password = message.text.strip()
+    if not state:
+        return
 
-    async def check_and_save():
+    if state["step"] == "login":
+        state["login"] = message.text.strip()
+        state["step"] = "password"
+        await bot.send_message(message.chat.id, "Теперь введи **пароль**:")
+
+    elif state["step"] == "password":
+        login = state["login"]
+        password = message.text.strip()
+
         client = TISClient(login, password)
-        if await client.login():
+        success = await client.login()
+        await client.close()
+
+        if success:
             save_user(user_id, message.chat.id, login, password)
+            del user_states[user_id]
             await bot.send_message(message.chat.id, "✅ Учётная запись успешно подключена!")
             await show_menu(message.chat.id)
         else:
             await bot.send_message(message.chat.id, "❌ Не удалось войти. Проверь логин и пароль.")
-        await client.close()
-
-    asyncio.create_task(check_and_save())
+            del user_states[user_id]
 
 @bot.message_handler(func=lambda m: m.text == "📊 Статус")
 async def status(message):
