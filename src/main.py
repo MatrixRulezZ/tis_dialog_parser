@@ -81,36 +81,18 @@ class TISClient:
         self.session = None
 
     async def login(self):
-        logger.info("[TIS] login() started")
         try:
             if self.session:
-                logger.info("[TIS] closing old session")
                 await self.session.close()
-            else:
-                logger.info("[TIS] no old session")
-
             self.session = aiohttp.ClientSession()
-            logger.info("[TIS] new session created")
-
             data = {"login": self.tis_login, "passv": self.tis_password, "remember": "1"}
             async with self.session.post("https://stats.tis-dialog.ru/index.php", data=data):
                 pass
-
             async with self.session.get("https://stats.tis-dialog.ru/index.php") as resp:
                 text = await resp.text(encoding='windows-1251', errors='ignore')
-
-            # Улучшенная проверка успешного входа
-            success = (
-                "Выйти" in text or
-                "Выход" in text or
-                "Баланс" in text or
-                "lkInfoTable" in text
-            )
-            logger.info(f"[TIS] Login success check result: {success}")
-            return success
-
+            return "Выйти" in text or "Выход" in text or "Баланс" in text or "lkInfoTable" in text
         except Exception as e:
-            logger.error(f"[TIS] Login error: {e}")
+            logger.error(f"Login error: {e}")
             return False
 
     def _get_value(self, soup, label):
@@ -212,11 +194,9 @@ async def register_start(call):
 async def registration_handler(message):
     user_id = message.from_user.id
     state = user_states.get(user_id)
-
     if not state or not isinstance(state, dict):
         if user_id in user_states:
             del user_states[user_id]
-        await bot.send_message(message.chat.id, "Ошибка состояния. Начните заново с /start")
         return
 
     if state.get("step") == "login":
@@ -227,9 +207,7 @@ async def registration_handler(message):
     elif state.get("step") == "password":
         login = state.get("login")
         password = message.text.strip()
-
         if not login:
-            await bot.send_message(message.chat.id, "Логин не найден. Начните заново.")
             del user_states[user_id]
             return
 
@@ -275,14 +253,15 @@ async def pay(message):
     await client.close()
 
     if qr:
-        await bot.send_photo(message.chat.id, qr, caption="QR-код для оплаты")
+        await bot.send_photo(message.chat.id, qr, caption="QR-код для оплаты (СБП)")
     else:
-        await bot.send_message(message.chat.id, "Не удалось получить QR")
+        await bot.send_message(message.chat.id, "Не удалось получить QR-код")
 
 @bot.message_handler(func=lambda m: m.text == "🔄 Обновить данные")
 async def refresh(message):
     await status(message)
 
+# ==================== ФОНОВАЯ ПРОВЕРКА (восстановлена) ====================
 async def background_monitor():
     while True:
         try:
@@ -298,12 +277,14 @@ async def background_monitor():
                 if not data:
                     continue
 
+                # Уведомление при отрицательном балансе
                 if data["balance"] < 0:
                     try:
                         await bot.send_message(chat_id, "⚠️ Баланс ушёл в минус!")
                     except:
                         pass
 
+                # Уведомление при смене IP
                 if data["ip"] != "Н/Д" and last_ip and data["ip"] != last_ip:
                     try:
                         await bot.send_message(chat_id, f"🌐 IP изменился: `{data['ip']}`", parse_mode="Markdown")
@@ -313,9 +294,9 @@ async def background_monitor():
                 update_user_stats(telegram_id, data["balance"], data["traffic_gb"], data["ip"])
 
         except Exception as e:
-            logger.error(f"Background error: {e}")
+            logger.error(f"Background monitor error: {e}")
 
-        await asyncio.sleep(1800)
+        await asyncio.sleep(1800)  # каждые 30 минут
 
 async def main():
     logger.info("Бот запускается...")
