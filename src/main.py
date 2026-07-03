@@ -18,8 +18,6 @@ if not BOT_TOKEN:
 
 DB_FILE = "tis_users.db"
 
-# ... (все функции init_db, get_user, save_user, update_user_stats остаются без изменений) ...
-
 def init_db():
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
@@ -77,9 +75,9 @@ def update_user_stats(telegram_id, balance, traffic_gb, ip):
 init_db()
 
 class TISClient:
-    def __init__(self, login, password):
-        self.login = login
-        self.password = password
+    def __init__(self, tis_login, tis_password):
+        self.tis_login = tis_login
+        self.tis_password = tis_password
         self.session = None
 
     async def login(self):
@@ -89,21 +87,17 @@ class TISClient:
                 logger.info("[TIS] closing old session")
                 await self.session.close()
             else:
-                logger.info("[TIS] no old session, creating new")
+                logger.info("[TIS] no old session")
 
             self.session = aiohttp.ClientSession()
-            logger.info("[TIS] session created")
+            logger.info("[TIS] new session created")
 
-            data = {"login": self.login, "passv": self.password, "remember": "1"}
-            logger.info("[TIS] sending POST to login")
-
+            data = {"login": self.tis_login, "passv": self.tis_password, "remember": "1"}
             async with self.session.post("https://stats.tis-dialog.ru/index.php", data=data):
                 pass
 
-            logger.info("[TIS] POST done, sending GET to check login")
             async with self.session.get("https://stats.tis-dialog.ru/index.php") as resp:
                 text = await resp.text(encoding='windows-1251', errors='ignore')
-                logger.info("[TIS] GET done, checking result")
                 return "Выйти" in text
 
         except Exception as e:
@@ -119,7 +113,6 @@ class TISClient:
         return "Н/Д"
 
     async def fetch_data(self):
-        # (оставь без изменений)
         try:
             if not self.session or self.session.closed:
                 if not await self.login():
@@ -166,7 +159,7 @@ class TISClient:
             if not self.session or self.session.closed:
                 if not await self.login():
                     return None
-            url = f"https://stats.tis-dialog.ru/qrpay.php?phnumber={self.login}"
+            url = f"https://stats.tis-dialog.ru/qrpay.php?phnumber={self.tis_login}"
             async with self.session.get(url) as resp:
                 if resp.status == 200:
                     return await resp.read()
@@ -178,8 +171,6 @@ class TISClient:
     async def close(self):
         if self.session:
             await self.session.close()
-
-# ... (весь остальной код бота остаётся таким же, как в предыдущем сообщении) ...
 
 bot = AsyncTeleBot(BOT_TOKEN)
 user_states = {}
@@ -213,57 +204,44 @@ async def registration_handler(message):
     user_id = message.from_user.id
     state = user_states.get(user_id)
 
-    logger.info(f"[REG] Пользователь {user_id} отправил сообщение. Текущее состояние: {state}")
-
     if not state or not isinstance(state, dict):
         if user_id in user_states:
             del user_states[user_id]
-        await bot.send_message(message.chat.id, "Ошибка состояния регистрации. Начните заново командой /start")
+        await bot.send_message(message.chat.id, "Ошибка состояния. Начните заново с /start")
         return
 
-    try:
-        if state.get("step") == "login":
-            state["login"] = message.text.strip()
-            state["step"] = "password"
-            logger.info(f"[REG] Логин сохранён, переходим к паролю")
-            await bot.send_message(message.chat.id, "Теперь введи **пароль**:")
+    if state.get("step") == "login":
+        state["login"] = message.text.strip()
+        state["step"] = "password"
+        await bot.send_message(message.chat.id, "Теперь введи **пароль**:")
 
-        elif state.get("step") == "password":
-            login = state.get("login")
-            password = message.text.strip()
+    elif state.get("step") == "password":
+        login = state.get("login")
+        password = message.text.strip()
 
-            if not login:
-                await bot.send_message(message.chat.id, "Ошибка: логин не найден. Начните регистрацию заново.")
-                del user_states[user_id]
-                return
-
-            logger.info(f"[REG] Пытаемся войти с логином {login}")
-            client = TISClient(login, password)
-            success = await client.login()
-            await client.close()
-
-            if success:
-                save_user(user_id, message.chat.id, login, password)
-                del user_states[user_id]
-                await bot.send_message(message.chat.id, "✅ Учётная запись успешно подключена!")
-                await show_menu(message.chat.id)
-            else:
-                await bot.send_message(message.chat.id, "❌ Не удалось войти. Проверь логин и пароль.")
-                del user_states[user_id]
-    except Exception as e:
-        logger.error(f"[REG] Ошибка в обработчике регистрации: {e}")
-        if user_id in user_states:
+        if not login:
+            await bot.send_message(message.chat.id, "Логин не найден. Начните заново.")
             del user_states[user_id]
-        await bot.send_message(message.chat.id, "Произошла ошибка при регистрации. Попробуйте ещё раз.")
+            return
 
-# Остальные обработчики (status, pay, refresh, background_monitor, main) — без изменений
-# (я сократил их здесь для brevity, но они должны остаться точно такими же, как в предыдущем сообщении)
+        client = TISClient(login, password)
+        success = await client.login()
+        await client.close()
+
+        if success:
+            save_user(user_id, message.chat.id, login, password)
+            del user_states[user_id]
+            await bot.send_message(message.chat.id, "✅ Учётная запись успешно подключена!")
+            await show_menu(message.chat.id)
+        else:
+            await bot.send_message(message.chat.id, "❌ Не удалось войти. Проверь логин и пароль.")
+            del user_states[user_id]
 
 @bot.message_handler(func=lambda m: m.text == "📊 Статус")
 async def status(message):
     user = get_user(message.from_user.id)
     if not user:
-        await bot.send_message(message.chat.id, "Сначала подключи кабинет через /start")
+        await bot.send_message(message.chat.id, "Сначала подключи кабинет")
         return
 
     client = TISClient(user["tis_login"], user["tis_password"])
@@ -288,9 +266,9 @@ async def pay(message):
     await client.close()
 
     if qr:
-        await bot.send_photo(message.chat.id, qr, caption="QR-код для оплаты (СБП)")
+        await bot.send_photo(message.chat.id, qr, caption="QR-код для оплаты")
     else:
-        await bot.send_message(message.chat.id, "Не удалось получить QR-код")
+        await bot.send_message(message.chat.id, "Не удалось получить QR")
 
 @bot.message_handler(func=lambda m: m.text == "🔄 Обновить данные")
 async def refresh(message):
