@@ -164,7 +164,7 @@ class TISClient:
             await self.session.close()
 
 bot = AsyncTeleBot(BOT_TOKEN)
-user_states = {}   # Храним состояние регистрации
+user_states = {}
 
 @bot.message_handler(commands=['start'])
 async def start(message):
@@ -195,17 +195,26 @@ async def registration_handler(message):
     user_id = message.from_user.id
     state = user_states.get(user_id)
 
-    if not state:
+    # Защита от плохого состояния
+    if not state or not isinstance(state, dict):
+        if user_id in user_states:
+            del user_states[user_id]
+        await bot.send_message(message.chat.id, "Произошла ошибка регистрации. Начните заново с /start")
         return
 
-    if state["step"] == "login":
+    if state.get("step") == "login":
         state["login"] = message.text.strip()
         state["step"] = "password"
         await bot.send_message(message.chat.id, "Теперь введи **пароль**:")
 
-    elif state["step"] == "password":
-        login = state["login"]
+    elif state.get("step") == "password":
+        login = state.get("login")
         password = message.text.strip()
+
+        if not login:
+            await bot.send_message(message.chat.id, "Ошибка: логин не найден. Начните регистрацию заново.")
+            del user_states[user_id]
+            return
 
         client = TISClient(login, password)
         success = await client.login()
