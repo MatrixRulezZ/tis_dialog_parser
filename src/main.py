@@ -235,6 +235,14 @@ class TISClient:
             match = re.search(r'IP:(\d{1,3}(?:\.\d{1,3}){3})', data["activity"])
             if match:
                 data["ip"] = match.group(1)
+            traffic_gb = 0.0
+            m = re.search(r'([\d.,]+)', data["incoming"])
+            if m:
+                try:
+                    traffic_gb = float(m.group(1).replace(',', '.'))
+                except ValueError:
+                    traffic_gb = 0.0
+            data["traffic_gb"] = traffic_gb
             traffic_table = soup.select_one('.lkTraficTable')
             if traffic_table:
                 tds = traffic_table.select('td')
@@ -523,30 +531,34 @@ async def background_monitor():
             conn.close()
             for telegram_id, chat_id, login, password, last_ip, last_notif_date in users:
                 client = TISClient(login, password)
-                data = await client.fetch_data()
-                if data:
-                    if data["balance"] < 0:
-                        try:
-                            await bot.send_message(chat_id, "⚠️ Баланс ушёл в минус!")
-                        except:
-                            pass
-                    if data["ip"] != "Н/Д" and last_ip and data["ip"] != last_ip:
-                        try:
-                            await bot.send_message(chat_id, f"🌐 IP изменился: `{data['ip']}`", parse_mode="Markdown")
-                        except:
-                            pass
-                    update_user_stats(telegram_id, data["balance"], data["traffic_gb"], data["ip"])
-                notifs = await client.get_notifications_list()
-                if notifs:
-                    newest = notifs[0]["short_text"]
-                    current_date = newest[:10] if len(newest) > 10 else ""
-                    if current_date and current_date != last_notif_date:
-                        try:
-                            await bot.send_message(chat_id, f"🔔 **Новое уведомление:**\n\n{newest}")
-                            update_last_notification(telegram_id, current_date)
-                        except:
-                            pass
-                await client.close()
+                try:
+                    data = await client.fetch_data()
+                    if data:
+                        if data["balance"] < 0:
+                            try:
+                                await bot.send_message(chat_id, "⚠️ Баланс ушёл в минус!")
+                            except Exception:
+                                pass
+                        if data["ip"] != "Н/Д" and last_ip and data["ip"] != last_ip:
+                            try:
+                                await bot.send_message(chat_id, f"🌐 IP изменился: `{data['ip']}`", parse_mode="Markdown")
+                            except Exception:
+                                pass
+                        update_user_stats(telegram_id, data["balance"], data["traffic_gb"], data["ip"])
+                    notifs = await client.get_notifications_list()
+                    if notifs:
+                        newest = notifs[0]["short_text"]
+                        current_date = newest[:10] if len(newest) > 10 else ""
+                        if current_date and current_date != last_notif_date:
+                            try:
+                                await bot.send_message(chat_id, f"🔔 **Новое уведомление:**\n\n{newest}")
+                                update_last_notification(telegram_id, current_date)
+                            except Exception:
+                                pass
+                except Exception as e:
+                    logger.error(f"Monitor error for user {telegram_id}: {e}")
+                finally:
+                    await client.close()
         except Exception as e:
             logger.error(f"Background error: {e}")
         await asyncio.sleep(1800)
