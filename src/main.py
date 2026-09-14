@@ -144,6 +144,17 @@ class TISClient:
             logger.error(f"get_notification_full error: {e}")
             return "Ошибка при загрузке уведомления."
 
+    @staticmethod
+    def _cell_text(td):
+        # выкидываем скрытые/служебные элементы (поля inline-редактирования и т.п.)
+        for el in td.find_all(["input", "script", "style"]) + td.find_all(attrs={"contenteditable": True}):
+            el.decompose()
+        for el in td.find_all(style=True):
+            style = el.get("style", "").replace(" ", "").lower()
+            if "display:none" in style or "visibility:hidden" in style:
+                el.decompose()
+        return td.get_text(strip=True)
+
     async def get_payments(self, limit=12):
         try:
             if not self.session or self.session.closed:
@@ -160,9 +171,9 @@ class TISClient:
                     tds = row.select('td')
                     if len(tds) >= 3:
                         payments.append([
-                            tds[0].get_text(strip=True),
-                            tds[1].get_text(strip=True),
-                            tds[2].get_text(strip=True),
+                            self._cell_text(tds[0]),
+                            self._cell_text(tds[1]),
+                            self._cell_text(tds[2]),
                         ])
             return payments
         except:
