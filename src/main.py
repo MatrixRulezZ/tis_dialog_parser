@@ -159,7 +159,11 @@ class TISClient:
                 for row in table.select('tr')[1:limit+1]:
                     tds = row.select('td')
                     if len(tds) >= 3:
-                        payments.append(f"{tds[0].get_text(strip=True)} | {tds[1].get_text(strip=True)} | {tds[2].get_text(strip=True)}")
+                        payments.append([
+                            tds[0].get_text(strip=True),
+                            tds[1].get_text(strip=True),
+                            tds[2].get_text(strip=True),
+                        ])
             return payments
         except:
             return []
@@ -426,10 +430,21 @@ async def payments(message):
     pays = await client.get_payments(12)
     await client.close()
     if pays:
-        text = "📜 **Последние платежи:**\n\n"
-        for p in pays:
-            text += f"• {p}\n"
-        await bot.send_message(message.chat.id, text)
+        def esc(s):
+            return str(s).replace("`", "'").replace("*", "").replace("_", "")
+
+        headers = ["Дата", "Сумма", "Операция"]
+        rows = [[esc(c) for c in row] for row in pays]
+        table = [headers] + rows
+        widths = [max(len(row[i]) for row in table) for i in range(len(headers))]
+        lines = []
+        for idx, row in enumerate(table):
+            line = " | ".join(row[i].ljust(widths[i]) for i in range(len(headers)))
+            lines.append(line)
+            if idx == 0:
+                lines.append("-+-".join("-" * w for w in widths))
+        text = "📜 *Последние платежи:*\n\n```\n" + "\n".join(lines) + "\n```"
+        await bot.send_message(message.chat.id, text, parse_mode="Markdown")
     else:
         await bot.send_message(message.chat.id, "Не удалось получить историю.")
 
