@@ -8,6 +8,7 @@ import logging
 import os
 import sqlite3
 import html
+import time
 from cryptography.fernet import Fernet, InvalidToken
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -36,11 +37,21 @@ DB_FILE = os.getenv("DB_FILE", "tis_users.db")
 def encrypt_password(password):
     return fernet.encrypt(password.encode()).decode()
 
+_decrypt_warned = False
+
 def decrypt_password(token):
+    global _decrypt_warned
     try:
         return fernet.decrypt(token.encode()).decode()
-    except (InvalidToken, ValueError, AttributeError):
-        # не шифротекст (старая запись открытым текстом) — возвращаем как есть
+    except (InvalidToken, ValueError):
+        if not _decrypt_warned:
+            logger.warning(
+                "Не удалось расшифровать пароль из БД: вероятно, неверный TIS_DB_KEY "
+                "или старая запись открытым текстом. Если ключ утерян — кабинеты придётся подключить заново."
+            )
+            _decrypt_warned = True
+        return token
+    except AttributeError:
         return token
 
 def init_db():
@@ -57,7 +68,8 @@ def init_db():
             last_balance REAL DEFAULT 0,
             last_traffic_gb REAL DEFAULT 0,
             last_ip TEXT DEFAULT '',
-            last_notification_date TEXT DEFAULT ''
+            last_notification_date TEXT DEFAULT '',
+            notified_negative INTEGER DEFAULT 0
         )
     ''')
     cursor.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_accounts_user_login ON accounts(telegram_id, tis_login)')
@@ -89,13 +101,17 @@ def migrate_users_to_accounts():
         logger.info(f"Миграция: перенесено кабинетов — {len(rows)}")
     conn.close()
 
-def migrate_add_alias_column():
+def migrate_add_columns():
+    # добавляем колонки, появившиеся в новых версиях (идемпотентно)
     conn = sqlite3.connect(DB_FILE)
     cols = [r[1] for r in conn.execute("PRAGMA table_info(accounts)").fetchall()]
     if "alias" not in cols:
         conn.execute("ALTER TABLE accounts ADD COLUMN alias TEXT DEFAULT ''")
-        conn.commit()
         logger.info("Миграция: добавлена колонка alias")
+    if "notified_negative" not in cols:
+        conn.execute("ALTER TABLE accounts ADD COLUMN notified_negative INTEGER DEFAULT 0")
+        logger.info("Миграция: добавлена колонка notified_negative")
+    conn.commit()
     conn.close()
 
 def get_accounts(telegram_id):
@@ -158,6 +174,14 @@ def update_last_notification(account_id, date_str):
     conn.commit()
     conn.close()
 
+def set_notified_negative(account_id, value):
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute('UPDATE accounts SET notified_negative=? WHERE account_id=?',
+                   (1 if value else 0, account_id))
+    conn.commit()
+    conn.close()
+
 def migrate_plaintext_passwords():
     # шифротекст Fernet всегда начинается с "gAAAAA"; всё остальное — старые пароли открытым текстом
     conn = sqlite3.connect(DB_FILE)
@@ -178,7 +202,7 @@ def migrate_plaintext_passwords():
 
 init_db()
 migrate_users_to_accounts()
-migrate_add_alias_column()
+migrate_add_columns()
 migrate_plaintext_passwords()
 
 class TISClient:
@@ -375,7 +399,8 @@ class TISClient:
                     return None
             url = f"https://stats.tis-dialog.ru/qrpay.php?phnumber={self.tis_login}"
             async with self.session.get(url) as resp:
-                if resp.status == 200:
+                # сайт может вернуть HTML-страницу ошибки с кодом 200 — такое фото не отправляем
+                if resp.status == 200 and resp.content_type.startswith("image/"):
                     return await resp.read()
             return None
         except Exception as e:
@@ -396,6 +421,15 @@ bot = AsyncTeleBot(BOT_TOKEN)
 user_states = {}
 promised_confirm = {}
 user_notifications = {}
+
+STATE_TTL = 15 * 60  # незавершённый ввод логина/пароля/алиаса живёт 15 минут
+
+def purge_stale_states():
+    now = time.time()
+    for uid in list(user_states):
+        state = user_states.get(uid)
+        if isinstance(state, dict) and now - state.get("ts", now) > STATE_TTL:
+            del user_states[uid]
 
 def format_payment_row(row):
     date, amount, op = (html.escape(str(c)) for c in row)
@@ -443,7 +477,7 @@ async def show_menu(chat_id):
 @bot.callback_query_handler(func=lambda call: call.data == "register")
 async def register_start(call):
     user_id = call.from_user.id
-    user_states[user_id] = {"step": "login"}
+    user_states[user_id] = {"step": "login", "ts": time.time()}
     await bot.send_message(call.message.chat.id, "Введите <b>логин</b> от личного кабинета TIS:", parse_mode="HTML")
     await bot.answer_callback_query(call.id)
 
@@ -460,6 +494,8 @@ async def registration_handler(message):
         state["step"] = "password"
         await bot.send_message(message.chat.id, "Теперь введи <b>пароль</b>:", parse_mode="HTML")
     elif state.get("step") == "password":
+        # забираем state до первого await — конкурентные апдейты не обработают его повторно
+        del user_states[user_id]
         try:
             await bot.delete_message(message.chat.id, message.message_id)
         except Exception:
@@ -467,18 +503,15 @@ async def registration_handler(message):
         login = state.get("login")
         password = message.text.strip()
         if not login:
-            del user_states[user_id]
             return
         async with TISClient(login, password) as client:
             success = await client.login()
         if success:
             add_account(user_id, message.chat.id, login, password)
-            del user_states[user_id]
             await bot.send_message(message.chat.id, f"✅ Кабинет <b>{html.escape(login)}</b> подключён!", parse_mode="HTML")
             await show_menu(message.chat.id)
         else:
             await bot.send_message(message.chat.id, "❌ Не удалось войти. Проверь логин и пароль.")
-            del user_states[user_id]
     elif state.get("step") == "alias":
         account_id = state.get("account_id")
         text = (message.text or "").strip()
@@ -625,7 +658,7 @@ async def promised_payment(message):
     if not accounts:
         await bot.send_message(message.chat.id, "Сначала подключи кабинет (🔀 Кабинеты)")
         return
-    confirmed = promised_confirm.setdefault(user_id, set())
+    confirmed = set()
     for acc in accounts:
         title = account_title(acc["tis_login"], acc.get("alias"))
         async with TISClient(acc["tis_login"], acc["tis_password"]) as client:
@@ -642,6 +675,11 @@ async def promised_payment(message):
             await bot.send_message(message.chat.id, text, reply_markup=markup, parse_mode="HTML")
         else:
             await bot.send_message(message.chat.id, f"💰 {title}: обещанный платёж сейчас недоступен.", parse_mode="HTML")
+    # подтверждения живут только до следующего вызова команды — старые не копятся
+    if confirmed:
+        promised_confirm[user_id] = confirmed
+    else:
+        promised_confirm.pop(user_id, None)
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("activate_promised_"))
 async def activate_promised(call):
@@ -659,7 +697,9 @@ async def activate_promised(call):
         return
     async with TISClient(account["tis_login"], account["tis_password"]) as client:
         success = await client.activate_promised_payment()
-    promised_confirm[user_id].discard(account_id)
+    promised_confirm.get(user_id, set()).discard(account_id)
+    if user_id in promised_confirm and not promised_confirm[user_id]:
+        del promised_confirm[user_id]
     if success:
         await bot.send_message(call.message.chat.id, f"✅ Обещанный платёж активирован для {account_title(account['tis_login'], account.get('alias'))}!", parse_mode="HTML")
     else:
@@ -676,6 +716,8 @@ async def cancel_promised(call):
         return
     if user_id in promised_confirm:
         promised_confirm[user_id].discard(account_id)
+        if not promised_confirm[user_id]:
+            del promised_confirm[user_id]
     await bot.send_message(call.message.chat.id, "Отменено.")
     await bot.answer_callback_query(call.id)
 
@@ -818,7 +860,7 @@ async def alias_set_start(call):
     if not account:
         await bot.answer_callback_query(call.id, "Кабинет не найден")
         return
-    user_states[user_id] = {"step": "alias", "account_id": account_id}
+    user_states[user_id] = {"step": "alias", "account_id": account_id, "ts": time.time()}
     await bot.send_message(
         call.message.chat.id,
         f"Введите алиас для кабинета {account_title(account['tis_login'], account.get('alias'))} "
@@ -831,23 +873,30 @@ async def alias_set_start(call):
 async def background_monitor():
     while True:
         try:
+            purge_stale_states()
             conn = sqlite3.connect(DB_FILE)
             rows = conn.execute('''
-                SELECT account_id, chat_id, tis_login, tis_password, alias, last_ip, last_notification_date
+                SELECT account_id, chat_id, tis_login, tis_password, alias,
+                       last_ip, last_notification_date, notified_negative
                 FROM accounts
             ''').fetchall()
             conn.close()
-            for account_id, chat_id, login, password, alias, last_ip, last_notif_date in rows:
+            for account_id, chat_id, login, password, alias, last_ip, last_notif_date, notified_negative in rows:
                 title = account_title(login, alias)
                 try:
                     async with TISClient(login, decrypt_password(password)) as client:
                         data = await client.fetch_data()
                         if data:
+                            # уведомляем о минусе один раз при переходе через ноль, а не каждый цикл
                             if data["balance"] < 0:
-                                try:
-                                    await bot.send_message(chat_id, f"⚠️ {title}: баланс ушёл в минус!", parse_mode="HTML")
-                                except Exception:
-                                    pass
+                                if not notified_negative:
+                                    try:
+                                        await bot.send_message(chat_id, f"⚠️ {title}: баланс ушёл в минус!", parse_mode="HTML")
+                                        set_notified_negative(account_id, True)
+                                    except Exception:
+                                        pass
+                            elif notified_negative:
+                                set_notified_negative(account_id, False)
                             if data["ip"] != "Н/Д" and last_ip and data["ip"] != last_ip:
                                 try:
                                     await bot.send_message(chat_id, f"🌐 {title}: IP изменился: <code>{html.escape(data['ip'])}</code>", parse_mode="HTML")
