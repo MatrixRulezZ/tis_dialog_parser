@@ -7,6 +7,7 @@ import re
 import logging
 import os
 import sqlite3
+import html
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("tis_dialog_bot")
@@ -449,21 +450,15 @@ async def payments(message):
     pays = await client.get_payments(12)
     await client.close()
     if pays:
-        def esc(s):
-            return str(s).replace("`", "'").replace("*", "").replace("_", "")
+        def fmt(row):
+            date, amount, op = (html.escape(str(c)) for c in row)
+            amt = amount.replace(" ", "")
+            if amt.startswith("-"):
+                return f"📉 <code>{date}</code>  <b>{amt} ₽</b> — {op}"
+            return f"💳 <code>{date}</code>  <b>+{amt} ₽</b> — {op}"
 
-        headers = ["Дата", "Сумма", "Операция"]
-        rows = [[esc(c) for c in row] for row in pays]
-        table = [headers] + rows
-        widths = [max(len(row[i]) for row in table) for i in range(len(headers))]
-        lines = []
-        for idx, row in enumerate(table):
-            line = " | ".join(row[i].ljust(widths[i]) for i in range(len(headers)))
-            lines.append(line)
-            if idx == 0:
-                lines.append("-+-".join("-" * w for w in widths))
-        text = "📜 *Последние платежи:*\n\n```\n" + "\n".join(lines) + "\n```"
-        await bot.send_message(message.chat.id, text, parse_mode="Markdown")
+        text = "📜 <b>Последние платежи:</b>\n\n" + "\n".join(fmt(row) for row in pays)
+        await bot.send_message(message.chat.id, text, parse_mode="HTML")
     else:
         await bot.send_message(message.chat.id, "Не удалось получить историю.")
 
