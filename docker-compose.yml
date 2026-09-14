@@ -4,8 +4,8 @@ services:
     build: .
     environment:
       - BOT_TOKEN=${BOT_TOKEN}
-      - CHAT_ID=${CHAT_ID}
-      # Можно убрать TIS_LOGIN / TIS_PASSWORD — они теперь в БД
+      - TIS_DB_KEY=${TIS_DB_KEY}
+      - DB_FILE=/app/data/tis_users.db   # БД внутри volume, чтобы переживать пересоздание контейнера
     volumes:
       - ./data:/app/data          # ← важно для сохранения БД
     restart: unless-stopped

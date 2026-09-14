@@ -39,9 +39,16 @@ cd tis_dialog_parser
 
 ```env
 BOT_TOKEN=твой_токен_бота
+TIS_DB_KEY=ключ_шифрования_паролей
 ```
 
 > Токен можно получить у [@BotFather](https://t.me/BotFather)
+
+> `TIS_DB_KEY` — ключ для шифрования паролей TIS в базе. Сгенерировать:
+> ```bash
+> python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+> ```
+> **Важно:** при утере ключа сохранённые пароли восстановить нельзя. При первом запуске бот сам зашифрует старые пароли из БД.
 
 ### 3. Запуск через Docker
 

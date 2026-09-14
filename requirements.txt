@@ -3,3 +3,4 @@ beautifulsoup4
 pyTelegramBotAPI
 soupsieve
 qrcode[pil]
+cryptography

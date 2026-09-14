@@ -8,6 +8,7 @@ import logging
 import os
 import sqlite3
 import html
+from cryptography.fernet import Fernet, InvalidToken
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("tis_dialog_bot")
@@ -17,7 +18,30 @@ if not BOT_TOKEN:
     logger.error("BOT_TOKEN не задан!")
     exit(1)
 
-DB_FILE = "tis_users.db"
+DB_KEY = os.getenv('TIS_DB_KEY')
+if not DB_KEY:
+    logger.error(
+        "TIS_DB_KEY не задан! Сгенерируйте ключ командой:\n"
+        "python -c \"from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())\""
+    )
+    exit(1)
+try:
+    fernet = Fernet(DB_KEY)
+except Exception as e:
+    logger.error(f"Некорректный TIS_DB_KEY: {e}")
+    exit(1)
+
+DB_FILE = os.getenv("DB_FILE", "tis_users.db")
+
+def encrypt_password(password):
+    return fernet.encrypt(password.encode()).decode()
+
+def decrypt_password(token):
+    try:
+        return fernet.decrypt(token.encode()).decode()
+    except (InvalidToken, ValueError, AttributeError):
+        # не шифротекст (старая запись открытым текстом) — возвращаем как есть
+        return token
 
 def init_db():
     conn = sqlite3.connect(DB_FILE)
@@ -48,7 +72,7 @@ def get_user(telegram_id):
             "telegram_id": row[0],
             "chat_id": row[1],
             "tis_login": row[2],
-            "tis_password": row[3],
+            "tis_password": decrypt_password(row[3]),
             "last_balance": row[4],
             "last_traffic_gb": row[5],
             "last_ip": row[6],
@@ -66,7 +90,7 @@ def save_user(telegram_id, chat_id, tis_login, tis_password):
             chat_id=excluded.chat_id,
             tis_login=excluded.tis_login,
             tis_password=excluded.tis_password
-    ''', (telegram_id, chat_id, tis_login, tis_password))
+    ''', (telegram_id, chat_id, tis_login, encrypt_password(tis_password)))
     conn.commit()
     conn.close()
 
@@ -86,7 +110,26 @@ def update_last_notification(telegram_id, date_str):
     conn.commit()
     conn.close()
 
+def migrate_plaintext_passwords():
+    # шифротекст Fernet всегда начинается с "gAAAAA"; всё остальное — старые пароли открытым текстом
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    rows = cursor.execute("SELECT telegram_id, tis_password FROM users").fetchall()
+    changed = 0
+    for telegram_id, pw in rows:
+        if not (isinstance(pw, str) and pw.startswith("gAAAAA")):
+            cursor.execute(
+                "UPDATE users SET tis_password=? WHERE telegram_id=?",
+                (encrypt_password(pw or ""), telegram_id)
+            )
+            changed += 1
+    if changed:
+        conn.commit()
+        logger.info(f"Миграция: зашифровано паролей — {changed}")
+    conn.close()
+
 init_db()
+migrate_plaintext_passwords()
 
 class TISClient:
     def __init__(self, tis_login, tis_password):
