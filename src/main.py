@@ -47,9 +47,10 @@ def init_db():
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
     cursor.execute('''
-        CREATE TABLE IF NOT EXISTS users (
-            telegram_id INTEGER PRIMARY KEY,
-            chat_id INTEGER,
+        CREATE TABLE IF NOT EXISTS accounts (
+            account_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            telegram_id INTEGER NOT NULL,
+            chat_id INTEGER NOT NULL,
             tis_login TEXT NOT NULL,
             tis_password TEXT NOT NULL,
             last_balance REAL DEFAULT 0,
@@ -58,55 +59,83 @@ def init_db():
             last_notification_date TEXT DEFAULT ''
         )
     ''')
+    cursor.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_accounts_user_login ON accounts(telegram_id, tis_login)')
     conn.commit()
     conn.close()
 
-def get_user(telegram_id):
+def migrate_users_to_accounts():
+    # одноразовая миграция со старой схемы "один пользователь = один кабинет"
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
-    cursor.execute("SELECT * FROM users WHERE telegram_id = ?", (telegram_id,))
-    row = cursor.fetchone()
+    has_users = cursor.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='users'"
+    ).fetchone()
+    if has_users:
+        rows = cursor.execute('''
+            SELECT telegram_id, chat_id, tis_login, tis_password,
+                   last_balance, last_traffic_gb, last_ip, last_notification_date
+            FROM users
+        ''').fetchall()
+        for r in rows:
+            cursor.execute('''
+                INSERT OR IGNORE INTO accounts
+                    (telegram_id, chat_id, tis_login, tis_password,
+                     last_balance, last_traffic_gb, last_ip, last_notification_date)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ''', r)
+        cursor.execute("DROP TABLE users")
+        conn.commit()
+        logger.info(f"Миграция: перенесено кабинетов — {len(rows)}")
     conn.close()
-    if row:
-        return {
-            "telegram_id": row[0],
-            "chat_id": row[1],
-            "tis_login": row[2],
-            "tis_password": decrypt_password(row[3]),
-            "last_balance": row[4],
-            "last_traffic_gb": row[5],
-            "last_ip": row[6],
-            "last_notification_date": row[7] or ""
-        }
-    return None
 
-def save_user(telegram_id, chat_id, tis_login, tis_password):
+def get_accounts(telegram_id):
+    conn = sqlite3.connect(DB_FILE)
+    rows = conn.execute('''
+        SELECT account_id, tis_login, tis_password, chat_id
+        FROM accounts WHERE telegram_id = ? ORDER BY account_id
+    ''', (telegram_id,)).fetchall()
+    conn.close()
+    return [
+        {
+            "account_id": r[0],
+            "tis_login": r[1],
+            "tis_password": decrypt_password(r[2]),
+            "chat_id": r[3],
+        }
+        for r in rows
+    ]
+
+def add_account(telegram_id, chat_id, tis_login, tis_password):
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
     cursor.execute('''
-        INSERT INTO users (telegram_id, chat_id, tis_login, tis_password)
+        INSERT OR IGNORE INTO accounts (telegram_id, chat_id, tis_login, tis_password)
         VALUES (?, ?, ?, ?)
-        ON CONFLICT(telegram_id) DO UPDATE SET
-            chat_id=excluded.chat_id,
-            tis_login=excluded.tis_login,
-            tis_password=excluded.tis_password
     ''', (telegram_id, chat_id, tis_login, encrypt_password(tis_password)))
     conn.commit()
     conn.close()
 
-def update_user_stats(telegram_id, balance, traffic_gb, ip):
+def delete_account(telegram_id, account_id):
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
-    cursor.execute('''
-        UPDATE users SET last_balance=?, last_traffic_gb=?, last_ip=? WHERE telegram_id=?
-    ''', (balance, traffic_gb, ip, telegram_id))
+    cursor.execute('DELETE FROM accounts WHERE telegram_id = ? AND account_id = ?',
+                   (telegram_id, account_id))
     conn.commit()
     conn.close()
 
-def update_last_notification(telegram_id, date_str):
+def update_account_stats(account_id, balance, traffic_gb, ip):
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
-    cursor.execute('UPDATE users SET last_notification_date=? WHERE telegram_id=?', (date_str, telegram_id))
+    cursor.execute('''
+        UPDATE accounts SET last_balance=?, last_traffic_gb=?, last_ip=? WHERE account_id=?
+    ''', (balance, traffic_gb, ip, account_id))
+    conn.commit()
+    conn.close()
+
+def update_last_notification(account_id, date_str):
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute('UPDATE accounts SET last_notification_date=? WHERE account_id=?', (date_str, account_id))
     conn.commit()
     conn.close()
 
@@ -114,13 +143,13 @@ def migrate_plaintext_passwords():
     # шифротекст Fernet всегда начинается с "gAAAAA"; всё остальное — старые пароли открытым текстом
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
-    rows = cursor.execute("SELECT telegram_id, tis_password FROM users").fetchall()
+    rows = cursor.execute("SELECT account_id, tis_password FROM accounts").fetchall()
     changed = 0
-    for telegram_id, pw in rows:
+    for account_id, pw in rows:
         if not (isinstance(pw, str) and pw.startswith("gAAAAA")):
             cursor.execute(
-                "UPDATE users SET tis_password=? WHERE telegram_id=?",
-                (encrypt_password(pw or ""), telegram_id)
+                "UPDATE accounts SET tis_password=? WHERE account_id=?",
+                (encrypt_password(pw or ""), account_id)
             )
             changed += 1
     if changed:
@@ -129,6 +158,7 @@ def migrate_plaintext_passwords():
     conn.close()
 
 init_db()
+migrate_users_to_accounts()
 migrate_plaintext_passwords()
 
 class TISClient:
@@ -159,8 +189,8 @@ class TISClient:
                     return []
             url = f"https://stats.tis-dialog.ru/index.php?mod=msg&phnumber={self.tis_login}"
             async with self.session.get(url) as resp:
-                html = await resp.text(encoding='windows-1251', errors='ignore')
-            soup = BS(html, 'html.parser')
+                html_ = await resp.text(encoding='windows-1251', errors='ignore')
+            soup = BS(html_, 'html.parser')
             notifications = []
             for div in soup.select('.contentBlock > div[style*="margin-bottom"]'):
                 a_tag = div.find('a')
@@ -184,24 +214,13 @@ class TISClient:
                     return "Ошибка загрузки."
             url = f"https://stats.tis-dialog.ru/index.php?mod=msg&comsg={notif_id}&phnumber={self.tis_login}"
             async with self.session.get(url) as resp:
-                html = await resp.text(encoding='windows-1251', errors='ignore')
-            soup = BS(html, 'html.parser')
+                html_ = await resp.text(encoding='windows-1251', errors='ignore')
+            soup = BS(html_, 'html.parser')
             content = soup.select_one('.contentBlock')
             return content.get_text("\n", strip=True) if content else "Текст не найден."
         except Exception as e:
             logger.error(f"get_notification_full error: {e}")
             return "Ошибка при загрузке уведомления."
-
-    @staticmethod
-    def _cell_text(td):
-        # выкидываем скрытые/служебные элементы (поля inline-редактирования и т.п.)
-        for el in td.find_all(["input", "script", "style"]) + td.find_all(attrs={"contenteditable": True}):
-            el.decompose()
-        for el in td.find_all(style=True):
-            style = el.get("style", "").replace(" ", "").lower()
-            if "display:none" in style or "visibility:hidden" in style:
-                el.decompose()
-        return td.get_text(strip=True)
 
     async def get_payments(self, limit=12):
         try:
@@ -210,8 +229,8 @@ class TISClient:
                     return []
             url = f"https://stats.tis-dialog.ru/index.php?mod=payments&phnumber={self.tis_login}"
             async with self.session.get(url) as resp:
-                html = await resp.text(encoding='windows-1251', errors='ignore')
-            soup = BS(html, 'html.parser')
+                html_ = await resp.text(encoding='windows-1251', errors='ignore')
+            soup = BS(html_, 'html.parser')
             payments = []
             table = soup.select_one('.lkTraficTable')
             if table:
@@ -228,6 +247,17 @@ class TISClient:
             logger.error(f"get_payments error: {e}")
             return []
 
+    @staticmethod
+    def _cell_text(td):
+        # выкидываем скрытые/служебные элементы (поля inline-редактирования и т.п.)
+        for el in td.find_all(["input", "script", "style"]) + td.find_all(attrs={"contenteditable": True}):
+            el.decompose()
+        for el in td.find_all(style=True):
+            style = el.get("style", "").replace(" ", "").lower()
+            if "display:none" in style or "visibility:hidden" in style:
+                el.decompose()
+        return td.get_text(strip=True)
+
     async def get_promised_payment_info(self):
         try:
             if not self.session or self.session.closed:
@@ -235,8 +265,8 @@ class TISClient:
                     return {"available": False, "balance": 0}
             url = f"https://stats.tis-dialog.ru/index.php?mod=promisedpay&phnumber={self.tis_login}"
             async with self.session.get(url) as resp:
-                html = await resp.text(encoding='windows-1251', errors='ignore')
-            text = html
+                html_ = await resp.text(encoding='windows-1251', errors='ignore')
+            text = html_
             available = "Активировать" in text
             balance = 0
             match = re.search(r'На счете:\s*([\d.,]+)', text)
@@ -274,8 +304,8 @@ class TISClient:
                 if not await self.login():
                     return None
             async with self.session.get("https://stats.tis-dialog.ru/index.php") as resp:
-                html = await resp.text(encoding='windows-1251', errors='ignore')
-            soup = BS(html, 'html.parser')
+                html_ = await resp.text(encoding='windows-1251', errors='ignore')
+            soup = BS(html_, 'html.parser')
             for a in soup.find_all("a"):
                 a.decompose()
             data = {
@@ -347,23 +377,24 @@ user_states = {}
 promised_confirm = {}
 user_notifications = {}
 
+def format_payment_row(row):
+    date, amount, op = (html.escape(str(c)) for c in row)
+    amt = amount.replace(" ", "")
+    if amt.startswith("-"):
+        return f"📉 <code>{date}</code>  <b>{amt} ₽</b> — {op}"
+    return f"💳 <code>{date}</code>  <b>+{amt} ₽</b> — {op}"
+
 @bot.message_handler(commands=['start'])
 async def start(message):
-    user = get_user(message.from_user.id)
-    if user:
-        await bot.send_message(message.chat.id, f"Привет! Ты подключен как <code>{html.escape(user['tis_login'])}</code>", parse_mode="HTML")
+    accounts = get_accounts(message.from_user.id)
+    if accounts:
+        logins = ", ".join(f"<b>{html.escape(a['tis_login'])}</b>" for a in accounts)
+        await bot.send_message(message.chat.id, f"Привет! Твои кабинеты: {logins}", parse_mode="HTML")
         await show_menu(message.chat.id)
     else:
         markup = types.InlineKeyboardMarkup()
         markup.add(types.InlineKeyboardButton("🔗 Подключить кабинет TIS", callback_data="register"))
         await bot.send_message(message.chat.id, "Нажми кнопку, чтобы подключить свой личный кабинет TIS.", reply_markup=markup)
-
-async def show_menu(chat_id):
-    markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    markup.add("📊 Статус", "💳 Оплатить")
-    markup.add("🔔 Уведомления", "📜 История платежей")
-    markup.add("💰 Обещанный платёж", "🔄 Обновить данные")
-    await bot.send_message(chat_id, "Выбери действие:", reply_markup=markup)
 
 @bot.message_handler(commands=['cancel'])
 async def cancel(message):
@@ -374,6 +405,13 @@ async def cancel(message):
         await bot.send_message(message.chat.id, "Регистрация отменена.")
     else:
         await bot.send_message(message.chat.id, "Нечего отменять.")
+
+async def show_menu(chat_id):
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    markup.add("📊 Статус", "💳 Оплатить")
+    markup.add("🔔 Уведомления", "📜 История платежей")
+    markup.add("💰 Обещанный платёж", "🔀 Кабинеты")
+    await bot.send_message(chat_id, "Выбери действие:", reply_markup=markup)
 
 @bot.callback_query_handler(func=lambda call: call.data == "register")
 async def register_start(call):
@@ -407,9 +445,9 @@ async def registration_handler(message):
         async with TISClient(login, password) as client:
             success = await client.login()
         if success:
-            save_user(user_id, message.chat.id, login, password)
+            add_account(user_id, message.chat.id, login, password)
             del user_states[user_id]
-            await bot.send_message(message.chat.id, "✅ Учётная запись успешно подключена!")
+            await bot.send_message(message.chat.id, f"✅ Кабинет <b>{html.escape(login)}</b> подключён!", parse_mode="HTML")
             await show_menu(message.chat.id)
         else:
             await bot.send_message(message.chat.id, "❌ Не удалось войти. Проверь логин и пароль.")
@@ -417,82 +455,98 @@ async def registration_handler(message):
 
 @bot.message_handler(func=lambda m: m.text == "📊 Статус")
 async def status(message):
-    user = get_user(message.from_user.id)
-    if not user:
-        await bot.send_message(message.chat.id, "Сначала подключи кабинет")
+    accounts = get_accounts(message.from_user.id)
+    if not accounts:
+        await bot.send_message(message.chat.id, "Сначала подключи кабинет (🔀 Кабинеты)")
         return
-    async with TISClient(user["tis_login"], user["tis_password"]) as client:
-        data = await client.fetch_data()
-    if data:
+    for acc in accounts:
+        login_esc = html.escape(acc["tis_login"])
+        async with TISClient(acc["tis_login"], acc["tis_password"]) as client:
+            data = await client.fetch_data()
+        if not data:
+            await bot.send_message(message.chat.id, f"❌ <b>{login_esc}</b>: не удалось получить данные", parse_mode="HTML")
+            continue
         turbo_clean = data['turbo']
         if '(' in turbo_clean and ')' in turbo_clean:
             turbo_clean = turbo_clean.split('(')[1].replace(')', '').strip()
 
         text = (
-            "📊 <b>Твой статус</b>\n\n"
+            f"📊 <b>{login_esc}</b>\n\n"
             f"📌 <b>Тариф:</b> {html.escape(data['tariff'])}\n"
             f"💰 <b>Баланс:</b> {html.escape(data['balance_raw'])}\n"
             f"🟢 <b>Состояние:</b> {html.escape(data['status'])}\n"
             f"⚡ <b>Скорость:</b> {html.escape(data['speed'])}\n"
             f"🚀 <b>Остаток турбо:</b> {html.escape(turbo_clean)}\n"
             f"🌐 <b>IP:</b> <code>{html.escape(data['ip'])}</code>\n\n"
-            "📈 <b>Трафик за текущий период:</b>\n"
+            f"📈 <b>Трафик за текущий период:</b>\n"
             f"⬇️ Входящий: {html.escape(data['incoming'])}\n"
             f"⬆️ Исходящий: {html.escape(data['outgoing'])}"
         )
         await bot.send_message(message.chat.id, text, parse_mode="HTML")
-    else:
-        await bot.send_message(message.chat.id, "Не удалось получить данные")
 
 @bot.message_handler(func=lambda m: m.text == "🔔 Уведомления")
 async def notifications(message):
-    user = get_user(message.from_user.id)
-    if not user:
-        await bot.send_message(message.chat.id, "Сначала подключи кабинет")
+    user_id = message.from_user.id
+    accounts = get_accounts(user_id)
+    if not accounts:
+        await bot.send_message(message.chat.id, "Сначала подключи кабинет (🔀 Кабинеты)")
         return
-    async with TISClient(user["tis_login"], user["tis_password"]) as client:
-        notifs = await client.get_notifications_list()
-    if not notifs:
-        await bot.send_message(message.chat.id, "Уведомлений нет.")
-        return
-    user_notifications[message.from_user.id] = notifs
-    markup = types.InlineKeyboardMarkup(row_width=1)
-    for n in notifs:
-        markup.add(types.InlineKeyboardButton(n["short_text"], callback_data=f"view_notif_{n['id']}"))
-    markup.add(types.InlineKeyboardButton("❌ Закрыть", callback_data="close_notifications"))
-    await bot.send_message(message.chat.id, "🔔 Выберите уведомление:", reply_markup=markup)
+    user_notifications[user_id] = {}
+    for acc in accounts:
+        login_esc = html.escape(acc["tis_login"])
+        async with TISClient(acc["tis_login"], acc["tis_password"]) as client:
+            notifs = await client.get_notifications_list()
+        if not notifs:
+            await bot.send_message(message.chat.id, f"🔔 <b>{login_esc}</b>: уведомлений нет", parse_mode="HTML")
+            continue
+        user_notifications[user_id][acc["account_id"]] = notifs
+        markup = types.InlineKeyboardMarkup(row_width=1)
+        for n in notifs:
+            markup.add(types.InlineKeyboardButton(n["short_text"], callback_data=f"view_notif_{acc['account_id']}_{n['id']}"))
+        markup.add(types.InlineKeyboardButton("❌ Закрыть", callback_data="close_notifications"))
+        await bot.send_message(message.chat.id, f"🔔 <b>{login_esc}</b> — выберите уведомление:", reply_markup=markup, parse_mode="HTML")
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("view_notif_"))
 async def view_notification(call):
     user_id = call.from_user.id
-    notif_id = call.data.replace("view_notif_", "")
-    user = get_user(user_id)
-    if not user:
+    try:
+        _, _, account_id, notif_id = call.data.split("_")
+        account_id = int(account_id)
+    except ValueError:
         await bot.answer_callback_query(call.id)
         return
-    async with TISClient(user["tis_login"], user["tis_password"]) as client:
+    account = next((a for a in get_accounts(user_id) if a["account_id"] == account_id), None)
+    if not account:
+        await bot.answer_callback_query(call.id)
+        return
+    async with TISClient(account["tis_login"], account["tis_password"]) as client:
         full_text = await client.get_notification_full(notif_id)
     markup = types.InlineKeyboardMarkup()
-    markup.add(types.InlineKeyboardButton("⬅️ Назад к списку", callback_data="back_to_notifications"))
+    markup.add(types.InlineKeyboardButton("⬅️ Назад к списку", callback_data=f"back_to_notifications_{account_id}"))
     await bot.edit_message_text(
         chat_id=call.message.chat.id,
         message_id=call.message.message_id,
-        text=f"📄 <b>Полный текст уведомления:</b>\n\n{html.escape(full_text)}",
+        text=f"📄 <b>{html.escape(account['tis_login'])}</b> — <b>полный текст уведомления:</b>\n\n{html.escape(full_text)}",
         reply_markup=markup,
         parse_mode="HTML"
     )
     await bot.answer_callback_query(call.id)
 
-@bot.callback_query_handler(func=lambda call: call.data == "back_to_notifications")
+@bot.callback_query_handler(func=lambda call: call.data.startswith("back_to_notifications"))
 async def back_to_notifications(call):
     user_id = call.from_user.id
-    notifs = user_notifications.get(user_id, [])
+    try:
+        account_id = int(call.data.rsplit("_", 1)[-1])
+    except ValueError:
+        account_id = None
+    notifs = user_notifications.get(user_id, {}).get(account_id, [])
     if not notifs:
         await bot.edit_message_text(chat_id=call.message.chat.id, message_id=call.message.message_id, text="Уведомлений нет.")
+        await bot.answer_callback_query(call.id)
         return
     markup = types.InlineKeyboardMarkup(row_width=1)
     for n in notifs:
-        markup.add(types.InlineKeyboardButton(n["short_text"], callback_data=f"view_notif_{n['id']}"))
+        markup.add(types.InlineKeyboardButton(n["short_text"], callback_data=f"view_notif_{account_id}_{n['id']}"))
     markup.add(types.InlineKeyboardButton("❌ Закрыть", callback_data="close_notifications"))
     await bot.edit_message_text(
         chat_id=call.message.chat.id,
@@ -509,124 +563,225 @@ async def close_notifications(call):
 
 @bot.message_handler(func=lambda m: m.text == "📜 История платежей")
 async def payments(message):
-    user = get_user(message.from_user.id)
-    if not user:
-        await bot.send_message(message.chat.id, "Сначала подключи кабинет")
+    accounts = get_accounts(message.from_user.id)
+    if not accounts:
+        await bot.send_message(message.chat.id, "Сначала подключи кабинет (🔀 Кабинеты)")
         return
-    client = TISClient(user["tis_login"], user["tis_password"])
-    pays = await client.get_payments(12)
-    await client.close()
-    if pays:
-        def fmt(row):
-            date, amount, op = (html.escape(str(c)) for c in row)
-            amt = amount.replace(" ", "")
-            if amt.startswith("-"):
-                return f"📉 <code>{date}</code>  <b>{amt} ₽</b> — {op}"
-            return f"💳 <code>{date}</code>  <b>+{amt} ₽</b> — {op}"
-
-        text = "📜 <b>Последние платежи:</b>\n\n" + "\n".join(fmt(row) for row in pays)
+    for acc in accounts:
+        login_esc = html.escape(acc["tis_login"])
+        async with TISClient(acc["tis_login"], acc["tis_password"]) as client:
+            pays = await client.get_payments(12)
+        if pays:
+            text = f"📜 <b>{login_esc}</b> — последние платежи:\n\n" + "\n".join(format_payment_row(row) for row in pays)
+        else:
+            text = f"📜 <b>{login_esc}</b>: не удалось получить историю."
         await bot.send_message(message.chat.id, text, parse_mode="HTML")
-    else:
-        await bot.send_message(message.chat.id, "Не удалось получить историю.")
 
 @bot.message_handler(func=lambda m: m.text == "💰 Обещанный платёж")
 async def promised_payment(message):
-    user = get_user(message.from_user.id)
-    if not user:
-        await bot.send_message(message.chat.id, "Сначала подключи кабинет")
+    user_id = message.from_user.id
+    accounts = get_accounts(user_id)
+    if not accounts:
+        await bot.send_message(message.chat.id, "Сначала подключи кабинет (🔀 Кабинеты)")
         return
-    async with TISClient(user["tis_login"], user["tis_password"]) as client:
-        info = await client.get_promised_payment_info()
-    if info["available"]:
-        text = (f"💰 <b>Обещанный платёж</b>\n\n"
-                f"Баланс: <b>{info['balance']} руб.</b>\n\n"
-                f"Стоимость: 30 руб. | Длительность: 5 дней.\n\n"
-                f"Активировать?")
-        markup = types.InlineKeyboardMarkup()
-        markup.add(types.InlineKeyboardButton("✅ Активировать", callback_data="activate_promised"))
-        markup.add(types.InlineKeyboardButton("❌ Отмена", callback_data="cancel_promised"))
-        await bot.send_message(message.chat.id, text, reply_markup=markup, parse_mode="HTML")
-        promised_confirm[message.from_user.id] = True
-    else:
-        await bot.send_message(message.chat.id, "Обещанный платёж сейчас недоступен.")
+    confirmed = promised_confirm.setdefault(user_id, set())
+    for acc in accounts:
+        login_esc = html.escape(acc["tis_login"])
+        async with TISClient(acc["tis_login"], acc["tis_password"]) as client:
+            info = await client.get_promised_payment_info()
+        if info["available"]:
+            confirmed.add(acc["account_id"])
+            text = (f"💰 <b>{login_esc}</b>\n\n"
+                    f"Баланс: <b>{info['balance']} руб.</b>\n\n"
+                    f"Стоимость: 30 руб. | Длительность: 5 дней.\n\n"
+                    f"Активировать?")
+            markup = types.InlineKeyboardMarkup()
+            markup.add(types.InlineKeyboardButton("✅ Активировать", callback_data=f"activate_promised_{acc['account_id']}"))
+            markup.add(types.InlineKeyboardButton("❌ Отмена", callback_data=f"cancel_promised_{acc['account_id']}"))
+            await bot.send_message(message.chat.id, text, reply_markup=markup, parse_mode="HTML")
+        else:
+            await bot.send_message(message.chat.id, f"💰 <b>{login_esc}</b>: обещанный платёж сейчас недоступен.", parse_mode="HTML")
 
-@bot.callback_query_handler(func=lambda call: call.data == "activate_promised")
+@bot.callback_query_handler(func=lambda call: call.data.startswith("activate_promised_"))
 async def activate_promised(call):
     user_id = call.from_user.id
-    if user_id not in promised_confirm:
+    try:
+        account_id = int(call.data.rsplit("_", 1)[-1])
+    except ValueError:
         await bot.answer_callback_query(call.id)
         return
-    user = get_user(user_id)
-    if not user:
+    if account_id not in promised_confirm.get(user_id, set()):
+        await bot.answer_callback_query(call.id)
         return
-    async with TISClient(user["tis_login"], user["tis_password"]) as client:
+    account = next((a for a in get_accounts(user_id) if a["account_id"] == account_id), None)
+    if not account:
+        return
+    async with TISClient(account["tis_login"], account["tis_password"]) as client:
         success = await client.activate_promised_payment()
-    del promised_confirm[user_id]
+    promised_confirm[user_id].discard(account_id)
     if success:
-        await bot.send_message(call.message.chat.id, "✅ Обещанный платёж активирован!")
+        await bot.send_message(call.message.chat.id, f"✅ Обещанный платёж активирован для <b>{html.escape(account['tis_login'])}</b>!", parse_mode="HTML")
     else:
-        await bot.send_message(call.message.chat.id, "❌ Не удалось активировать.")
+        await bot.send_message(call.message.chat.id, f"❌ <b>{html.escape(account['tis_login'])}</b>: не удалось активировать.", parse_mode="HTML")
     await bot.answer_callback_query(call.id)
 
-@bot.callback_query_handler(func=lambda call: call.data == "cancel_promised")
+@bot.callback_query_handler(func=lambda call: call.data.startswith("cancel_promised_"))
 async def cancel_promised(call):
     user_id = call.from_user.id
+    try:
+        account_id = int(call.data.rsplit("_", 1)[-1])
+    except ValueError:
+        await bot.answer_callback_query(call.id)
+        return
     if user_id in promised_confirm:
-        del promised_confirm[user_id]
+        promised_confirm[user_id].discard(account_id)
     await bot.send_message(call.message.chat.id, "Отменено.")
     await bot.answer_callback_query(call.id)
 
 @bot.message_handler(func=lambda m: m.text == "💳 Оплатить")
 async def pay(message):
-    user = get_user(message.from_user.id)
-    if not user:
-        await bot.send_message(message.chat.id, "Сначала подключи кабинет")
+    accounts = get_accounts(message.from_user.id)
+    if not accounts:
+        await bot.send_message(message.chat.id, "Сначала подключи кабинет (🔀 Кабинеты)")
         return
-    async with TISClient(user["tis_login"], user["tis_password"]) as client:
-        qr = await client.get_qr()
-    if qr:
-        await bot.send_photo(message.chat.id, qr, caption="QR-код для оплаты")
-    else:
-        await bot.send_message(message.chat.id, "Не удалось получить QR.")
+    for acc in accounts:
+        login_esc = html.escape(acc["tis_login"])
+        async with TISClient(acc["tis_login"], acc["tis_password"]) as client:
+            qr = await client.get_qr()
+        if qr:
+            await bot.send_photo(message.chat.id, qr, caption=f"💳 QR-код для оплаты — <b>{login_esc}</b>", parse_mode="HTML")
+        else:
+            await bot.send_message(message.chat.id, f"❌ <b>{login_esc}</b>: не удалось получить QR.", parse_mode="HTML")
 
-@bot.message_handler(func=lambda m: m.text == "🔄 Обновить данные")
-async def refresh(message):
-    await status(message)
+@bot.message_handler(func=lambda m: m.text == "🔀 Кабинеты")
+async def cabinets(message):
+    await show_cabinets(message.chat.id, message.from_user.id)
+
+def cabinets_keyboard(accounts):
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    markup.add(types.InlineKeyboardButton("➕ Подключить кабинет", callback_data="register"))
+    if accounts:
+        markup.add(types.InlineKeyboardButton("🚪 Выйти из кабинета", callback_data="leave_select"))
+    return markup
+
+def cabinets_text(accounts):
+    if accounts:
+        return "🔀 <b>Твои кабинеты:</b>\n\n" + "\n".join(
+            f"• <b>{html.escape(a['tis_login'])}</b>" for a in accounts
+        )
+    return "У тебя нет подключённых кабинетов."
+
+async def show_cabinets(chat_id, user_id):
+    accounts = get_accounts(user_id)
+    await bot.send_message(chat_id, cabinets_text(accounts), reply_markup=cabinets_keyboard(accounts), parse_mode="HTML")
+
+@bot.callback_query_handler(func=lambda call: call.data == "cabinets_back")
+async def cabinets_back(call):
+    accounts = get_accounts(call.from_user.id)
+    await bot.edit_message_text(
+        chat_id=call.message.chat.id,
+        message_id=call.message.message_id,
+        text=cabinets_text(accounts),
+        reply_markup=cabinets_keyboard(accounts),
+        parse_mode="HTML"
+    )
+    await bot.answer_callback_query(call.id)
+
+@bot.callback_query_handler(func=lambda call: call.data == "leave_select")
+async def leave_select(call):
+    accounts = get_accounts(call.from_user.id)
+    if not accounts:
+        await bot.answer_callback_query(call.id, "Нет кабинетов для выхода")
+        return
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    for a in accounts:
+        markup.add(types.InlineKeyboardButton(f"🚪 {a['tis_login']}", callback_data=f"leave_{a['account_id']}"))
+    markup.add(types.InlineKeyboardButton("⬅️ Назад", callback_data="cabinets_back"))
+    await bot.edit_message_text(
+        chat_id=call.message.chat.id,
+        message_id=call.message.message_id,
+        text="Выбери кабинет, из которого хочешь выйти:",
+        reply_markup=markup
+    )
+    await bot.answer_callback_query(call.id)
+
+@bot.callback_query_handler(func=lambda call: re.fullmatch(r"leave_\d+", call.data or ""))
+async def leave_confirm(call):
+    user_id = call.from_user.id
+    account_id = int(call.data.split("_")[1])
+    account = next((a for a in get_accounts(user_id) if a["account_id"] == account_id), None)
+    if not account:
+        await bot.answer_callback_query(call.id, "Кабинет не найден")
+        return
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    markup.add(types.InlineKeyboardButton("✅ Да, выйти", callback_data=f"confirm_leave_{account_id}"))
+    markup.add(types.InlineKeyboardButton("❌ Отмена", callback_data="cabinets_back"))
+    await bot.edit_message_text(
+        chat_id=call.message.chat.id,
+        message_id=call.message.message_id,
+        text=(f"Точно выйти из кабинета <b>{html.escape(account['tis_login'])}</b>?\n\n"
+              f"Информация по нему больше не будет показываться."),
+        reply_markup=markup,
+        parse_mode="HTML"
+    )
+    await bot.answer_callback_query(call.id)
+
+@bot.callback_query_handler(func=lambda call: re.fullmatch(r"confirm_leave_\d+", call.data or ""))
+async def leave_done(call):
+    user_id = call.from_user.id
+    account_id = int(call.data.split("_")[2])
+    delete_account(user_id, account_id)
+    # чистим кэши этого кабинета
+    user_notifications.get(user_id, {}).pop(account_id, None)
+    if user_id in promised_confirm:
+        promised_confirm[user_id].discard(account_id)
+    accounts = get_accounts(user_id)
+    await bot.edit_message_text(
+        chat_id=call.message.chat.id,
+        message_id=call.message.message_id,
+        text="✅ Кабинет отключён.\n\n" + cabinets_text(accounts),
+        reply_markup=cabinets_keyboard(accounts),
+        parse_mode="HTML"
+    )
+    await bot.answer_callback_query(call.id)
 
 async def background_monitor():
     while True:
         try:
             conn = sqlite3.connect(DB_FILE)
-            users = conn.execute("SELECT telegram_id, chat_id, tis_login, tis_password, last_ip, last_notification_date FROM users").fetchall()
+            rows = conn.execute('''
+                SELECT account_id, chat_id, tis_login, tis_password, last_ip, last_notification_date
+                FROM accounts
+            ''').fetchall()
             conn.close()
-            for telegram_id, chat_id, login, password, last_ip, last_notif_date in users:
+            for account_id, chat_id, login, password, last_ip, last_notif_date in rows:
                 try:
-                    async with TISClient(login, password) as client:
+                    async with TISClient(login, decrypt_password(password)) as client:
                         data = await client.fetch_data()
                         if data:
                             if data["balance"] < 0:
                                 try:
-                                    await bot.send_message(chat_id, "⚠️ Баланс ушёл в минус!")
+                                    await bot.send_message(chat_id, f"⚠️ <b>{html.escape(login)}</b>: баланс ушёл в минус!", parse_mode="HTML")
                                 except Exception:
                                     pass
                             if data["ip"] != "Н/Д" and last_ip and data["ip"] != last_ip:
                                 try:
-                                    await bot.send_message(chat_id, f"🌐 IP изменился: <code>{html.escape(data['ip'])}</code>", parse_mode="HTML")
+                                    await bot.send_message(chat_id, f"🌐 <b>{html.escape(login)}</b>: IP изменился: <code>{html.escape(data['ip'])}</code>", parse_mode="HTML")
                                 except Exception:
                                     pass
-                            update_user_stats(telegram_id, data["balance"], data["traffic_gb"], data["ip"])
+                            update_account_stats(account_id, data["balance"], data["traffic_gb"], data["ip"])
                         notifs = await client.get_notifications_list()
                         if notifs:
                             newest = notifs[0]["short_text"]
                             current_date = newest[:10] if len(newest) > 10 else ""
                             if current_date and current_date != last_notif_date:
                                 try:
-                                    await bot.send_message(chat_id, f"🔔 <b>Новое уведомление:</b>\n\n{html.escape(newest)}", parse_mode="HTML")
-                                    update_last_notification(telegram_id, current_date)
+                                    await bot.send_message(chat_id, f"🔔 <b>{html.escape(login)}</b> — <b>новое уведомление:</b>\n\n{html.escape(newest)}", parse_mode="HTML")
+                                    update_last_notification(account_id, current_date)
                                 except Exception:
                                     pass
                 except Exception as e:
-                    logger.error(f"Monitor error for user {telegram_id}: {e}")
+                    logger.error(f"Monitor error for account {account_id} ({login}): {e}")
         except Exception as e:
             logger.error(f"Background error: {e}")
         await asyncio.sleep(1800)
