@@ -21,7 +21,25 @@ fi
 mkdir -p "$BACKUP_DIR"
 stamp=$(date +%Y%m%d-%H%M%S)
 backup="$BACKUP_DIR/tis_users-$stamp.db"
-sqlite3 "$DB_FILE" ".backup '$backup'"
+
+# консистентная копия: через sqlite3, а если его нет — через модуль sqlite3 в python3
+if command -v sqlite3 >/dev/null 2>&1; then
+    sqlite3 "$DB_FILE" ".backup '$backup'"
+elif command -v python3 >/dev/null 2>&1; then
+    python3 - "$DB_FILE" "$backup" <<'PYEOF'
+import sqlite3, sys
+src, dst = sys.argv[1], sys.argv[2]
+src_conn = sqlite3.connect(src)
+dst_conn = sqlite3.connect(dst)
+with dst_conn:
+    src_conn.backup(dst_conn)
+src_conn.close()
+dst_conn.close()
+PYEOF
+else
+    echo "Нужен sqlite3 (apt install sqlite3) или python3" >&2
+    exit 1
+fi
 
 # храним только последние KEEP копий
 ls -1t "$BACKUP_DIR"/tis_users-*.db 2>/dev/null | tail -n +$((KEEP + 1)) | xargs -r rm -f
