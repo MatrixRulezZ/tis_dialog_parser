@@ -60,8 +60,12 @@ def save_user(telegram_id, chat_id, tis_login, tis_password):
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
     cursor.execute('''
-        INSERT OR REPLACE INTO users (telegram_id, chat_id, tis_login, tis_password)
+        INSERT INTO users (telegram_id, chat_id, tis_login, tis_password)
         VALUES (?, ?, ?, ?)
+        ON CONFLICT(telegram_id) DO UPDATE SET
+            chat_id=excluded.chat_id,
+            tis_login=excluded.tis_login,
+            tis_password=excluded.tis_password
     ''', (telegram_id, chat_id, tis_login, tis_password))
     conn.commit()
     conn.close()
@@ -94,7 +98,7 @@ class TISClient:
         try:
             if self.session:
                 await self.session.close()
-            self.session = aiohttp.ClientSession()
+            self.session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30))
             data = {"login": self.tis_login, "passv": self.tis_password, "remember": "1"}
             async with self.session.post("https://stats.tis-dialog.ru/index.php", data=data):
                 pass
@@ -177,7 +181,8 @@ class TISClient:
                             self._cell_text(tds[2]),
                         ])
             return payments
-        except:
+        except Exception as e:
+            logger.error(f"get_payments error: {e}")
             return []
 
     async def get_promised_payment_info(self):
@@ -195,7 +200,8 @@ class TISClient:
             if match:
                 balance = float(match.group(1).replace(',', '.'))
             return {"available": available, "balance": balance}
-        except:
+        except Exception as e:
+            logger.error(f"get_promised_payment_info error: {e}")
             return {"available": False, "balance": 0}
 
     async def activate_promised_payment(self):
@@ -207,7 +213,8 @@ class TISClient:
             async with self.session.post("https://stats.tis-dialog.ru/index.php", data=post_data) as resp:
                 result = await resp.text(encoding='windows-1251', errors='ignore')
                 return "успешно" in result.lower() or "активирована" in result.lower()
-        except:
+        except Exception as e:
+            logger.error(f"activate_promised_payment error: {e}")
             return False
 
     def _get_value(self, soup, label):
@@ -242,7 +249,7 @@ class TISClient:
             try:
                 num = re.sub(r'[^\d\-.]+', '', data["balance_raw"].replace(',', '.'))
                 data["balance"] = float(num) if num else 0.0
-            except:
+            except ValueError:
                 data["balance"] = 0.0
             match = re.search(r'IP:(\d{1,3}(?:\.\d{1,3}){3})', data["activity"])
             if match:
@@ -278,12 +285,19 @@ class TISClient:
                 if resp.status == 200:
                     return await resp.read()
             return None
-        except:
+        except Exception as e:
+            logger.error(f"get_qr error: {e}")
             return None
 
     async def close(self):
         if self.session:
             await self.session.close()
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        await self.close()
 
 bot = AsyncTeleBot(BOT_TOKEN)
 user_states = {}
@@ -294,7 +308,7 @@ user_notifications = {}
 async def start(message):
     user = get_user(message.from_user.id)
     if user:
-        await bot.send_message(message.chat.id, f"Привет! Ты подключен как `{user['tis_login']}`", parse_mode="Markdown")
+        await bot.send_message(message.chat.id, f"Привет! Ты подключен как <code>{html.escape(user['tis_login'])}</code>", parse_mode="HTML")
         await show_menu(message.chat.id)
     else:
         markup = types.InlineKeyboardMarkup()
@@ -308,11 +322,21 @@ async def show_menu(chat_id):
     markup.add("💰 Обещанный платёж", "🔄 Обновить данные")
     await bot.send_message(chat_id, "Выбери действие:", reply_markup=markup)
 
+@bot.message_handler(commands=['cancel'])
+async def cancel(message):
+    user_id = message.from_user.id
+    removed = user_states.pop(user_id, None) is not None
+    promised_confirm.pop(user_id, None)
+    if removed:
+        await bot.send_message(message.chat.id, "Регистрация отменена.")
+    else:
+        await bot.send_message(message.chat.id, "Нечего отменять.")
+
 @bot.callback_query_handler(func=lambda call: call.data == "register")
 async def register_start(call):
     user_id = call.from_user.id
     user_states[user_id] = {"step": "login"}
-    await bot.send_message(call.message.chat.id, "Введите **логин** от личного кабинета TIS:")
+    await bot.send_message(call.message.chat.id, "Введите <b>логин</b> от личного кабинета TIS:", parse_mode="HTML")
     await bot.answer_callback_query(call.id)
 
 @bot.message_handler(func=lambda m: m.from_user.id in user_states)
@@ -326,16 +350,19 @@ async def registration_handler(message):
     if state.get("step") == "login":
         state["login"] = message.text.strip()
         state["step"] = "password"
-        await bot.send_message(message.chat.id, "Теперь введи **пароль**:")
+        await bot.send_message(message.chat.id, "Теперь введи <b>пароль</b>:", parse_mode="HTML")
     elif state.get("step") == "password":
+        try:
+            await bot.delete_message(message.chat.id, message.message_id)
+        except Exception:
+            pass
         login = state.get("login")
         password = message.text.strip()
         if not login:
             del user_states[user_id]
             return
-        client = TISClient(login, password)
-        success = await client.login()
-        await client.close()
+        async with TISClient(login, password) as client:
+            success = await client.login()
         if success:
             save_user(user_id, message.chat.id, login, password)
             del user_states[user_id]
@@ -351,27 +378,26 @@ async def status(message):
     if not user:
         await bot.send_message(message.chat.id, "Сначала подключи кабинет")
         return
-    client = TISClient(user["tis_login"], user["tis_password"])
-    data = await client.fetch_data()
-    await client.close()
+    async with TISClient(user["tis_login"], user["tis_password"]) as client:
+        data = await client.fetch_data()
     if data:
         turbo_clean = data['turbo']
         if '(' in turbo_clean and ')' in turbo_clean:
             turbo_clean = turbo_clean.split('(')[1].replace(')', '').strip()
 
         text = (
-            "📊 **Твой статус**\n\n"
-            f"📌 **Тариф:** {data['tariff']}\n"
-            f"💰 **Баланс:** {data['balance_raw']}\n"
-            f"🟢 **Состояние:** {data['status']}\n"
-            f"⚡ **Скорость:** {data['speed']}\n"
-            f"🚀 **Остаток турбо:** {turbo_clean}\n"
-            f"🌐 **IP:** `{data['ip']}`\n\n"
-            "📈 **Трафик за текущий период:**\n"
-            f"⬇️ Входящий: {data['incoming']}\n"
-            f"⬆️ Исходящий: {data['outgoing']}"
+            "📊 <b>Твой статус</b>\n\n"
+            f"📌 <b>Тариф:</b> {html.escape(data['tariff'])}\n"
+            f"💰 <b>Баланс:</b> {html.escape(data['balance_raw'])}\n"
+            f"🟢 <b>Состояние:</b> {html.escape(data['status'])}\n"
+            f"⚡ <b>Скорость:</b> {html.escape(data['speed'])}\n"
+            f"🚀 <b>Остаток турбо:</b> {html.escape(turbo_clean)}\n"
+            f"🌐 <b>IP:</b> <code>{html.escape(data['ip'])}</code>\n\n"
+            "📈 <b>Трафик за текущий период:</b>\n"
+            f"⬇️ Входящий: {html.escape(data['incoming'])}\n"
+            f"⬆️ Исходящий: {html.escape(data['outgoing'])}"
         )
-        await bot.send_message(message.chat.id, text, parse_mode="Markdown")
+        await bot.send_message(message.chat.id, text, parse_mode="HTML")
     else:
         await bot.send_message(message.chat.id, "Не удалось получить данные")
 
@@ -381,9 +407,8 @@ async def notifications(message):
     if not user:
         await bot.send_message(message.chat.id, "Сначала подключи кабинет")
         return
-    client = TISClient(user["tis_login"], user["tis_password"])
-    notifs = await client.get_notifications_list()
-    await client.close()
+    async with TISClient(user["tis_login"], user["tis_password"]) as client:
+        notifs = await client.get_notifications_list()
     if not notifs:
         await bot.send_message(message.chat.id, "Уведомлений нет.")
         return
@@ -402,17 +427,16 @@ async def view_notification(call):
     if not user:
         await bot.answer_callback_query(call.id)
         return
-    client = TISClient(user["tis_login"], user["tis_password"])
-    full_text = await client.get_notification_full(notif_id)
-    await client.close()
+    async with TISClient(user["tis_login"], user["tis_password"]) as client:
+        full_text = await client.get_notification_full(notif_id)
     markup = types.InlineKeyboardMarkup()
     markup.add(types.InlineKeyboardButton("⬅️ Назад к списку", callback_data="back_to_notifications"))
     await bot.edit_message_text(
         chat_id=call.message.chat.id,
         message_id=call.message.message_id,
-        text=f"📄 **Полный текст уведомления:**\n\n{full_text}",
+        text=f"📄 <b>Полный текст уведомления:</b>\n\n{html.escape(full_text)}",
         reply_markup=markup,
-        parse_mode="Markdown"
+        parse_mode="HTML"
     )
     await bot.answer_callback_query(call.id)
 
@@ -468,18 +492,17 @@ async def promised_payment(message):
     if not user:
         await bot.send_message(message.chat.id, "Сначала подключи кабинет")
         return
-    client = TISClient(user["tis_login"], user["tis_password"])
-    info = await client.get_promised_payment_info()
-    await client.close()
+    async with TISClient(user["tis_login"], user["tis_password"]) as client:
+        info = await client.get_promised_payment_info()
     if info["available"]:
-        text = (f"💰 **Обещанный платёж**\n\n"
-                f"Баланс: **{info['balance']} руб.**\n\n"
+        text = (f"💰 <b>Обещанный платёж</b>\n\n"
+                f"Баланс: <b>{info['balance']} руб.</b>\n\n"
                 f"Стоимость: 30 руб. | Длительность: 5 дней.\n\n"
                 f"Активировать?")
         markup = types.InlineKeyboardMarkup()
         markup.add(types.InlineKeyboardButton("✅ Активировать", callback_data="activate_promised"))
         markup.add(types.InlineKeyboardButton("❌ Отмена", callback_data="cancel_promised"))
-        await bot.send_message(message.chat.id, text, reply_markup=markup, parse_mode="Markdown")
+        await bot.send_message(message.chat.id, text, reply_markup=markup, parse_mode="HTML")
         promised_confirm[message.from_user.id] = True
     else:
         await bot.send_message(message.chat.id, "Обещанный платёж сейчас недоступен.")
@@ -493,9 +516,8 @@ async def activate_promised(call):
     user = get_user(user_id)
     if not user:
         return
-    client = TISClient(user["tis_login"], user["tis_password"])
-    success = await client.activate_promised_payment()
-    await client.close()
+    async with TISClient(user["tis_login"], user["tis_password"]) as client:
+        success = await client.activate_promised_payment()
     del promised_confirm[user_id]
     if success:
         await bot.send_message(call.message.chat.id, "✅ Обещанный платёж активирован!")
@@ -517,9 +539,8 @@ async def pay(message):
     if not user:
         await bot.send_message(message.chat.id, "Сначала подключи кабинет")
         return
-    client = TISClient(user["tis_login"], user["tis_password"])
-    qr = await client.get_qr()
-    await client.close()
+    async with TISClient(user["tis_login"], user["tis_password"]) as client:
+        qr = await client.get_qr()
     if qr:
         await bot.send_photo(message.chat.id, qr, caption="QR-код для оплаты")
     else:
@@ -536,35 +557,33 @@ async def background_monitor():
             users = conn.execute("SELECT telegram_id, chat_id, tis_login, tis_password, last_ip, last_notification_date FROM users").fetchall()
             conn.close()
             for telegram_id, chat_id, login, password, last_ip, last_notif_date in users:
-                client = TISClient(login, password)
                 try:
-                    data = await client.fetch_data()
-                    if data:
-                        if data["balance"] < 0:
-                            try:
-                                await bot.send_message(chat_id, "⚠️ Баланс ушёл в минус!")
-                            except Exception:
-                                pass
-                        if data["ip"] != "Н/Д" and last_ip and data["ip"] != last_ip:
-                            try:
-                                await bot.send_message(chat_id, f"🌐 IP изменился: `{data['ip']}`", parse_mode="Markdown")
-                            except Exception:
-                                pass
-                        update_user_stats(telegram_id, data["balance"], data["traffic_gb"], data["ip"])
-                    notifs = await client.get_notifications_list()
-                    if notifs:
-                        newest = notifs[0]["short_text"]
-                        current_date = newest[:10] if len(newest) > 10 else ""
-                        if current_date and current_date != last_notif_date:
-                            try:
-                                await bot.send_message(chat_id, f"🔔 **Новое уведомление:**\n\n{newest}")
-                                update_last_notification(telegram_id, current_date)
-                            except Exception:
-                                pass
+                    async with TISClient(login, password) as client:
+                        data = await client.fetch_data()
+                        if data:
+                            if data["balance"] < 0:
+                                try:
+                                    await bot.send_message(chat_id, "⚠️ Баланс ушёл в минус!")
+                                except Exception:
+                                    pass
+                            if data["ip"] != "Н/Д" and last_ip and data["ip"] != last_ip:
+                                try:
+                                    await bot.send_message(chat_id, f"🌐 IP изменился: <code>{html.escape(data['ip'])}</code>", parse_mode="HTML")
+                                except Exception:
+                                    pass
+                            update_user_stats(telegram_id, data["balance"], data["traffic_gb"], data["ip"])
+                        notifs = await client.get_notifications_list()
+                        if notifs:
+                            newest = notifs[0]["short_text"]
+                            current_date = newest[:10] if len(newest) > 10 else ""
+                            if current_date and current_date != last_notif_date:
+                                try:
+                                    await bot.send_message(chat_id, f"🔔 <b>Новое уведомление:</b>\n\n{html.escape(newest)}", parse_mode="HTML")
+                                    update_last_notification(telegram_id, current_date)
+                                except Exception:
+                                    pass
                 except Exception as e:
                     logger.error(f"Monitor error for user {telegram_id}: {e}")
-                finally:
-                    await client.close()
         except Exception as e:
             logger.error(f"Background error: {e}")
         await asyncio.sleep(1800)
